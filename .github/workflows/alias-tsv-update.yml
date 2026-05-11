@@ -1,0 +1,73 @@
+name: Weekly alias TSV update
+
+# -- WHEN this workflow runs ------------------------------------------------
+on:
+  # Cron schedule: "0 3 * * 0" = 03:00 UTC every Sunday.
+  # GitHub uses UTC. Pick a quiet hour to be nice to NCBI's servers.
+  schedule:
+    - cron: "0 3 * * 0"
+
+  # Lets you trigger the workflow manually from the "Actions" tab in GitHub.
+  # Useful for testing without waiting for Sunday.
+  workflow_dispatch:
+
+# -- PERMISSIONS this workflow needs ----------------------------------------
+# By default, workflows can only read the repo. We need "write" so we can
+# create a Release and upload the TSV to it.
+permissions:
+  contents: write
+
+# -- WHAT this workflow does ------------------------------------------------
+jobs:
+  build-tsv:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Pull the repo's code onto the runner so our script is available.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Step 2: Install Python 3.13 on the runner.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Step 3: Install certifi (needed for HTTPS in the script).
+      - name: Install Python dependencies
+        run: pip install certifi
+
+      # Step 4: Download the NCBI Datasets CLI binary for Linux.
+      # The runner is Ubuntu, so we grab the linux-amd64 build from NCBI's FTP.
+      - name: Install NCBI Datasets CLI
+        run: |
+          curl -o datasets 'https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets'
+          chmod +x datasets
+          sudo mv datasets /usr/local/bin/
+          datasets --version
+
+      # Step 5: Run the collection script and produce aliases.tsv.gz.
+      # Output goes to the repo root so the next step can find it easily.
+      - name: Run alias collection script
+        run: python scripts/collect_aliases.py --output aliases.tsv.gz
+
+      # Step 6: Compute today's date in YYYY-MM-DD form, save it as a
+      # variable the next step can use as the Release tag.
+      - name: Compute Release tag
+        id: tag
+        run: echo "tag=data-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      # Step 7: Create a GitHub Release and attach the gzipped TSV.
+      # softprops/action-gh-release is a well-known community action for this.
+      - name: Publish TSV as GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Alias TSV - ${{ steps.tag.outputs.tag }}"
+          body: |
+            Weekly snapshot of alias names for the 50 longest molecules of
+            every eukaryotic genome assembly available on NCBI
+            (GenBank + RefSeq).
+
+            Generated automatically by the `Weekly alias TSV update` workflow.
+          files: aliases.tsv.gz

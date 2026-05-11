@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# NCBI Datasets CLI artifacts (downloaded test data — never commit)
+ncbi_dataset/
+ncbi_dataset.zip
+md5sum.txt
+sequence_report.jsonl
+
+# macOS junk
+.DS_Store
+**/.DS_Store.DS_Store
+**/.DS_Store

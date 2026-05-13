@@ -1,4 +1,4 @@
-name: Weekly alias TSV update
+name: Weekly alias data update
 
 # -- WHEN this workflow runs ------------------------------------------------
 on:
@@ -6,24 +6,22 @@ on:
   # GitHub uses UTC. Pick a quiet hour to be nice to NCBI's servers.
   schedule:
     - cron: "0 3 * * 0"
-
   # Lets you trigger the workflow manually from the "Actions" tab in GitHub.
   # Useful for testing without waiting for Sunday.
   workflow_dispatch:
 
 # -- PERMISSIONS this workflow needs ----------------------------------------
 # By default, workflows can only read the repo. We need "write" so we can
-# create a Release and upload the TSV to it.
+# create a Release and upload the data files to it.
 permissions:
   contents: write
 
 # -- WHAT this workflow does ------------------------------------------------
 jobs:
-  build-tsv:
+  build-data:
     runs-on: ubuntu-latest
-
     steps:
-      # Step 1: Pull the repo's code onto the runner so our script is available.
+      # Step 1: Pull the repo's code onto the runner so our scripts are available.
       - name: Check out repository
         uses: actions/checkout@v4
 
@@ -33,7 +31,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      # Step 3: Install certifi (needed for HTTPS in the script).
+      # Step 3: Install certifi (needed for HTTPS in the collection script).
       - name: Install Python dependencies
         run: pip install certifi
 
@@ -47,27 +45,47 @@ jobs:
           datasets --version
 
       # Step 5: Run the collection script and produce aliases.tsv.gz.
-      # Output goes to the repo root so the next step can find it easily.
+      # Output goes to the repo root so the next steps can find it easily.
       - name: Run alias collection script
         run: python scripts/collect_aliases.py --output aliases.tsv.gz
 
-      # Step 6: Compute today's date in YYYY-MM-DD form, save it as a
+      # Step 6: Build the SQLite database from the TSV.
+      # This is the new step — converts the TSV into the normalized DB
+      # that the alias-mapper CLI reads from.
+      - name: Build SQLite database from TSV
+        run: python scripts/build_alias_db.py --tsv aliases.tsv.gz --db aliases.db
+
+      # Step 7: Gzip the SQLite DB to reduce the Release asset size.
+      # SQLite files compress well (typically 3-4x), making downloads faster.
+      - name: Compress the SQLite database
+        run: gzip aliases.db
+
+      # Step 8: Compute today's date in YYYY-MM-DD form, save it as a
       # variable the next step can use as the Release tag.
       - name: Compute Release tag
         id: tag
         run: echo "tag=data-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      # Step 7: Create a GitHub Release and attach the gzipped TSV.
-      # softprops/action-gh-release is a well-known community action for this.
-      - name: Publish TSV as GitHub Release
+      # Step 9: Create a GitHub Release and attach both the TSV and the
+      # gzipped SQLite DB. Users who want raw tabular data can grab the TSV;
+      # users who want the queryable DB grab aliases.db.gz.
+      - name: Publish data files as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Alias TSV - ${{ steps.tag.outputs.tag }}"
+          name: "Alias data - ${{ steps.tag.outputs.tag }}"
           body: |
             Weekly snapshot of alias names for the 50 longest molecules of
             every eukaryotic genome assembly available on NCBI
             (GenBank + RefSeq).
 
-            Generated automatically by the `Weekly alias TSV update` workflow.
-          files: aliases.tsv.gz
+            Assets:
+              - `aliases.tsv.gz` — raw tabular data, gzipped.
+              - `aliases.db.gz`  — SQLite database (normalized schema, indexed
+                on accession), gzipped. Decompress before use:
+                `gunzip aliases.db.gz`.
+
+            Generated automatically by the `Weekly alias data update` workflow.
+          files: |
+            aliases.tsv.gz
+            aliases.db.gz

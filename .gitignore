@@ -227,3 +227,4 @@ sequence_report.jsonl
 .DS_Store
 **/.DS_Store.DS_Store
 **/.DS_Store
+*.db

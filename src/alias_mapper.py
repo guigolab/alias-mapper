@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-alias_mapper.py (v0.1)
+alias_mapper.py (v0.2)
 ----------------------
 Translates the chromosome / scaffold names in column 1 of a GFF file
-from one naming convention to another, using a SQLite alias database
-produced by build_alias_db.py.
+from one naming convention to another, using a normalized SQLite alias
+database produced by build_alias_db.py.
 
-v0.1 differs from v0 only in the data source: v0 loaded a gzipped TSV
-and filtered to one assembly in Python; v0.1 issues one SQL query that
-returns only the rows for the chosen assembly (using the index on
-ACCESSION). Same CLI, same output.
+Schema expectations:
+  - `assemblies` table with column `accession`
+  - `aliases` table with columns: accession, sequence_name,
+    assigned_molecule, genbank_acc, refseq_acc, ucsc_name, length
+  - Index on aliases(accession)
 
 Usage:
     python3 src/alias_mapper.py convert INPUT.gff \\
@@ -23,7 +24,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Short names exposed on the CLI mapped to columns in the SQLite table.
+# Short names exposed on the CLI mapped to columns in the aliases table.
 CONVENTIONS = {
     "genbank":           "genbank_acc",
     "refseq":            "refseq_acc",
@@ -32,7 +33,6 @@ CONVENTIONS = {
     "assigned-molecule": "assigned_molecule",
 }
 
-# Default path: <repo>/data/aliases.db (resolved relative to this script).
 DEFAULT_ALIAS_DB = (
     Path(__file__).resolve().parent.parent / "data" / "aliases.db"
 )
@@ -42,8 +42,8 @@ def load_alias_table(db_path, source_col, target_col, assembly):
     """
     Returns a dict { source_name -> target_name } for one assembly.
 
-    One SQL query, indexed on `accession`. Rows where either the source
-    or target column is empty are skipped.
+    One indexed SQL query. Rows where either column is NULL are
+    skipped (no translation possible).
     """
     if not db_path.exists():
         sys.exit(f"error: alias database not found at {db_path}")
@@ -51,6 +51,16 @@ def load_alias_table(db_path, source_col, target_col, assembly):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
+    # Sanity check: assembly must exist in assemblies table.
+    cur.execute("SELECT 1 FROM assemblies WHERE accession = ?", (assembly,))
+    if not cur.fetchone():
+        conn.close()
+        sys.exit(
+            f"error: assembly {assembly!r} not found in the database. "
+            f"Check the --assembly value."
+        )
+
+    # Pull the rows for this assembly. idx_accession makes this fast.
     query = f"""
         SELECT {source_col}, {target_col}
         FROM aliases
@@ -68,9 +78,9 @@ def load_alias_table(db_path, source_col, target_col, assembly):
 
     if not rows:
         sys.exit(
-            f"error: no rows found for assembly {assembly!r} with both "
+            f"error: no rows for assembly {assembly!r} with both "
             f"{source_col} and {target_col} populated. "
-            f"Check the --assembly value and that the database includes it."
+            f"This assembly may not have aliases in those conventions."
         )
 
     return dict(rows)
@@ -99,11 +109,11 @@ def translate_gff_line(line, alias_map, stats):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Translate sequence names in a GFF file (v0.1)."
+        description="Translate sequence names in a GFF file (v0.2)."
     )
     parser.add_argument(
         "command", choices=["convert"],
-        help="Subcommand to run (v0.1 only supports 'convert').",
+        help="Subcommand to run (v0.2 only supports 'convert').",
     )
     parser.add_argument("input", type=Path, help="Path to the input GFF file.")
     parser.add_argument(

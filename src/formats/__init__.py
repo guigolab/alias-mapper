@@ -13,13 +13,17 @@ from pathlib import Path
 
 from .base import FileTranslator
 from .gff import GffTranslator
+from .fasta import FastaTranslator
 
 # Extension → translator class. The CLI uses this to pick a translator
 # based on the input file's suffix.
 TRANSLATORS: dict[str, type[FileTranslator]] = {
-    ".gff":  GffTranslator,
-    ".gff3": GffTranslator,
-    ".gtf":  GffTranslator,
+    ".gff":   GffTranslator,
+    ".gff3":  GffTranslator,
+    ".gtf":   GffTranslator,
+    ".fa":    FastaTranslator,
+    ".fasta": FastaTranslator,
+    ".fna":   FastaTranslator,
 }
 
 
@@ -40,4 +44,10 @@ def translator_for(path) -> FileTranslator:
     return cls()
 
 
-__all__ = ["FileTranslator", "GffTranslator", "TRANSLATORS", "translator_for"]
+__all__ = [
+    "FileTranslator",
+    "GffTranslator",
+    "FastaTranslator",
+    "TRANSLATORS",
+    "translator_for",
+]

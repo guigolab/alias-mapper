@@ -40,13 +40,13 @@ DEFAULT_ALIAS_DB = (
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Translate sequence names in a GFF file (v0.2)."
+        description="Translate sequence names in a GFF/GTF/FASTA file."
     )
     parser.add_argument(
         "command", choices=["convert"],
         help="Subcommand to run (v0.2 only supports 'convert').",
     )
-    parser.add_argument("input", type=Path, help="Path to the input GFF file.")
+    parser.add_argument("input", type=Path, help="Path to the input file (GFF, GTF, or FASTA).")
     parser.add_argument(
         "--from", dest="src", required=True, choices=CONVENTIONS.keys(),
         help="Source naming convention.",
@@ -61,7 +61,7 @@ def main():
     )
     parser.add_argument(
         "-o", "--output", type=Path, required=True,
-        help="Path to write the translated GFF file.",
+        help="Path to write the translated file.",
     )
     parser.add_argument(
         "--alias-db", type=Path, default=DEFAULT_ALIAS_DB,

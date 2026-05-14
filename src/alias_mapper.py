@@ -3,14 +3,8 @@
 alias_mapper.py (v0.2)
 ----------------------
 Translates the chromosome / scaffold names in column 1 of a GFF file
-from one naming convention to another, using a normalized SQLite alias
-database produced by build_alias_db.py.
-
-Schema expectations:
-  - `assemblies` table with column `accession`
-  - `aliases` table with columns: accession, sequence_name,
-    assigned_molecule, genbank_acc, refseq_acc, ucsc_name, length
-  - Index on aliases(accession)
+from one naming convention to another, using an alias source (SQLite
+DB today; HTTP API in the future).
 
 Usage:
     python3 src/alias_mapper.py convert INPUT.gff \\
@@ -20,9 +14,14 @@ Usage:
 """
 
 import argparse
-import sqlite3
 import sys
 from pathlib import Path
+
+from alias_source import (
+    SqliteAliasSource,
+    AssemblyNotFoundError,
+    AliasNotFoundError,
+)
 
 # Short names exposed on the CLI mapped to columns in the aliases table.
 CONVENTIONS = {
@@ -36,54 +35,6 @@ CONVENTIONS = {
 DEFAULT_ALIAS_DB = (
     Path(__file__).resolve().parent.parent / "data" / "aliases.db"
 )
-
-
-def load_alias_table(db_path, source_col, target_col, assembly):
-    """
-    Returns a dict { source_name -> target_name } for one assembly.
-
-    One indexed SQL query. Rows where either column is NULL are
-    skipped (no translation possible).
-    """
-    if not db_path.exists():
-        sys.exit(f"error: alias database not found at {db_path}")
-
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # Sanity check: assembly must exist in assemblies table.
-    cur.execute("SELECT 1 FROM assemblies WHERE accession = ?", (assembly,))
-    if not cur.fetchone():
-        conn.close()
-        sys.exit(
-            f"error: assembly {assembly!r} not found in the database. "
-            f"Check the --assembly value."
-        )
-
-    # Pull the rows for this assembly. idx_accession makes this fast.
-    query = f"""
-        SELECT {source_col}, {target_col}
-        FROM aliases
-        WHERE accession = ?
-          AND {source_col} IS NOT NULL
-          AND {target_col} IS NOT NULL
-    """
-    try:
-        cur.execute(query, (assembly,))
-        rows = cur.fetchall()
-    except sqlite3.OperationalError as e:
-        sys.exit(f"error: SQL query failed: {e}")
-    finally:
-        conn.close()
-
-    if not rows:
-        sys.exit(
-            f"error: no rows for assembly {assembly!r} with both "
-            f"{source_col} and {target_col} populated. "
-            f"This assembly may not have aliases in those conventions."
-        )
-
-    return dict(rows)
 
 
 def translate_gff_line(line, alias_map, stats):
@@ -160,7 +111,21 @@ def main():
         f"  assembly={args.assembly}, from={args.src}, to={args.tgt}",
         file=sys.stderr,
     )
-    alias_map = load_alias_table(args.alias_db, src_col, tgt_col, args.assembly)
+
+    source = SqliteAliasSource(args.alias_db)
+    try:
+        alias_map = source.get_map(args.assembly, src_col, tgt_col)
+    except AssemblyNotFoundError:
+        sys.exit(
+            f"error: assembly {args.assembly!r} not found in the database. "
+            f"Check the --assembly value."
+        )
+    except AliasNotFoundError as e:
+        sys.exit(
+            f"error: {e}. "
+            f"This assembly may not have aliases in those conventions."
+        )
+
     print(f"  -> {len(alias_map)} entries loaded", file=sys.stderr)
 
     stats = {"mapped": 0, "unmapped": 0, "unmapped_examples": set()}

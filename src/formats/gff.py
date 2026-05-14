@@ -1,0 +1,36 @@
+"""GFF / GTF translator. Both formats put the sequence name in column 1."""
+
+from .base import FileTranslator
+
+
+class GffTranslator(FileTranslator):
+    """
+    Translator for GFF, GFF3, and GTF files.
+
+    All three are tab-separated with the sequence name in column 1.
+    Lines starting with '#' are comments/headers and pass through
+    unchanged.
+
+    Known limitation: '##sequence-region <name> ...' metadata lines
+    contain a sequence name that v0.2 does not translate. The design
+    doc flags this as a v1 follow-up.
+    """
+
+    def translate_line(self, line: str, alias_map: dict, stats: dict) -> str:
+        if not line or line.startswith("#"):
+            return line
+
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 1:
+            return line
+
+        seq_name = parts[0]
+        new_name = alias_map.get(seq_name)
+        if new_name is None:
+            stats["unmapped"] += 1
+            stats["unmapped_examples"].add(seq_name)
+            return line
+
+        parts[0] = new_name
+        stats["mapped"] += 1
+        return "\t".join(parts) + "\n"

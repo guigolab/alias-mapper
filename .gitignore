@@ -228,3 +228,9 @@ sequence_report.jsonl
 **/.DS_Store.DS_Store
 **/.DS_Store
 *.db
+test.gff
+test_new.gff
+test.gff
+test.gtf
+test_new.gff
+test_new.gtf

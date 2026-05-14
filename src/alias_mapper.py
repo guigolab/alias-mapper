@@ -22,6 +22,7 @@ from alias_source import (
     AssemblyNotFoundError,
     AliasNotFoundError,
 )
+from formats import translator_for
 
 # Short names exposed on the CLI mapped to columns in the aliases table.
 CONVENTIONS = {
@@ -35,27 +36,6 @@ CONVENTIONS = {
 DEFAULT_ALIAS_DB = (
     Path(__file__).resolve().parent.parent / "data" / "aliases.db"
 )
-
-
-def translate_gff_line(line, alias_map, stats):
-    """Translate one GFF line. Comments and blank lines pass through."""
-    if not line or line.startswith("#"):
-        return line
-
-    parts = line.rstrip("\n").split("\t")
-    if len(parts) < 1:
-        return line
-
-    seq_name = parts[0]
-    new_name = alias_map.get(seq_name)
-    if new_name is None:
-        stats["unmapped"] += 1
-        stats["unmapped_examples"].add(seq_name)
-        return line
-
-    parts[0] = new_name
-    stats["mapped"] += 1
-    return "\t".join(parts) + "\n"
 
 
 def main():
@@ -103,6 +83,12 @@ def main():
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pick a translator based on the input file's extension.
+    try:
+        translator = translator_for(args.input)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
     src_col = CONVENTIONS[args.src]
     tgt_col = CONVENTIONS[args.tgt]
 
@@ -134,7 +120,7 @@ def main():
     with open(args.input, "r", encoding="utf-8") as in_f, \
          open(args.output, "w", encoding="utf-8") as out_f:
         for line in in_f:
-            out_f.write(translate_gff_line(line, alias_map, stats))
+            out_f.write(translator.translate_line(line, alias_map, stats))
 
     print(
         f"Done. mapped={stats['mapped']}, unmapped={stats['unmapped']}",

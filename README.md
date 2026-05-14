@@ -24,18 +24,25 @@ git clone https://github.com/Max25R/alias-mapper.git
 cd alias-mapper
 ```
 
-Download the latest alias database from the Releases page and place
-it at `data/aliases.db`:
+Download the latest alias TSV from the data Release and build the
+local SQLite database from it. Data Releases are tagged
+`data-YYYY-MM-DD` (one per weekly build); find the most recent at
+[github.com/Max25R/alias-mapper/releases](https://github.com/Max25R/alias-mapper/releases)
+and substitute the tag below:
 
 ```bash
 mkdir -p data
-curl -L -o data/aliases.db.gz \
-    https://github.com/Max25R/alias-mapper/releases/latest/download/aliases.db.gz
-gunzip data/aliases.db.gz
+curl -L -o data/aliases.tsv.gz \
+    https://github.com/Max25R/alias-mapper/releases/download/data-YYYY-MM-DD/aliases.tsv.gz
+python3 scripts/build_alias_db.py --tsv data/aliases.tsv.gz --db data/aliases.db
 ```
 
-The CLI is `src/alias_mapper.py`. No installation step yet — run it
-directly with `python3`.
+The build step takes about a minute and produces a ~260 MB SQLite
+file at `data/aliases.db`. The CLI looks there by default; override
+with `--alias-db` if you've placed it elsewhere.
+
+The CLI itself is `src/alias_mapper.py`. No installation step yet —
+run it directly with `python3`.
 
 ## Quickstart
 
@@ -115,17 +122,18 @@ what didn't translate.
 
 ## Updating the alias database
 
-The alias data is rebuilt weekly from NCBI. To pick up a newer
-version, re-download:
+The alias data is rebuilt weekly from NCBI and published as a new
+`data-YYYY-MM-DD` Release. To pick up a newer version, re-run the
+install steps with a more recent tag:
 
 ```bash
-curl -L -o data/aliases.db.gz \
-    https://github.com/Max25R/alias-mapper/releases/latest/download/aliases.db.gz
-gunzip -f data/aliases.db.gz
+curl -L -o data/aliases.tsv.gz \
+    https://github.com/Max25R/alias-mapper/releases/download/data-YYYY-MM-DD/aliases.tsv.gz
+python3 scripts/build_alias_db.py --tsv data/aliases.tsv.gz --db data/aliases.db
 ```
 
-The TSV source (`aliases.tsv.gz`) is also published on each Release
-for users who want to inspect or process the raw data.
+`build_alias_db.py` overwrites the existing DB, so no manual cleanup
+is needed.
 
 ## More
 

@@ -1,6 +1,7 @@
 """Abstract base class for file format translators."""
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 
 class FileTranslator(ABC):
@@ -28,4 +29,23 @@ class FileTranslator(ABC):
             The translated line (with trailing newline). Lines that
             don't contain a translatable sequence name are returned
             unchanged.
+        """
+
+    @abstractmethod
+    def sample_names(self, path: Path, limit: int = 50) -> list[str]:
+        """
+        Read up to `limit` unique sequence names from the start of the file.
+
+        Used by auto-detection to decide which convention and assembly
+        the input file is using. Stops once `limit` unique names have
+        been collected, so this is O(limit) regardless of file size.
+
+        Args:
+            path:  Path to the input file.
+            limit: Maximum number of unique names to return.
+
+        Returns:
+            List of unique sequence names, preserving the order they
+            appeared in the file. May contain fewer than `limit` if
+            the file has fewer unique names.
         """

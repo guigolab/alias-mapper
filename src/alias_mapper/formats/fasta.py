@@ -1,5 +1,7 @@
 """FASTA translator. Sequence name lives in the header line, after the '>'."""
 
+from pathlib import Path
+
 from .base import FileTranslator
 
 
@@ -60,3 +62,24 @@ class FastaTranslator(FileTranslator):
 
         stats["mapped"] += 1
         return f">{new_name}{rest}{newline}"
+
+    def sample_names(self, path: Path, limit: int = 50) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith(">"):
+                    continue
+                # Parse header the same way translate_line does, so a name
+                # collected here is the same string that would be looked up.
+                body = line[1:].rstrip("\n")
+                i = 0
+                while i < len(body) and not body[i].isspace():
+                    i += 1
+                name = body[:i]
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+                    if len(names) >= limit:
+                        break
+        return names

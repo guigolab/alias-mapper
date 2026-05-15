@@ -1,5 +1,7 @@
 """GFF / GTF translator. Both formats put the sequence name in column 1."""
 
+from pathlib import Path
+
 from .base import FileTranslator
 
 
@@ -34,3 +36,21 @@ class GffTranslator(FileTranslator):
         parts[0] = new_name
         stats["mapped"] += 1
         return "\t".join(parts) + "\n"
+
+    def sample_names(self, path: Path, limit: int = 50) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if not parts:
+                    continue
+                name = parts[0]
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+                    if len(names) >= limit:
+                        break
+        return names

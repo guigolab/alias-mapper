@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-alias_mapper.py
----------------
+cli.py
+------
+Command-line entry point for alias-mapper.
+
 Translates the chromosome / scaffold names in GFF, GTF, or FASTA files
 from one naming convention to another, using an alias source (SQLite
 DB today; HTTP API in the future).
@@ -29,14 +31,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from alias_source import (
+from .alias_source import (
     SqliteAliasSource,
     AssemblyNotFoundError,
     AliasNotFoundError,
     LowConfidenceDetection,
 )
-from formats import translator_for
-from bootstrap import (
+from .formats import translator_for
+from .bootstrap import (
     BootstrapError,
     default_cache_path,
     ensure_db,

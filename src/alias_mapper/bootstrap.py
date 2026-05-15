@@ -21,14 +21,14 @@ Design notes:
 """
 
 import json
-import shutil
-import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import platformdirs
+
+from .build_alias_db import build_db
 
 
 # GitHub repo coordinates. Constants up here so they're easy to change
@@ -69,12 +69,23 @@ def default_cache_path() -> Path:
 
 def _http_get_json(url: str):
     """GET a URL, parse the JSON response, return the parsed object."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/vnd.github+json",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        if e.code == 403 and "rate limit" in (e.read().decode("utf-8", errors="replace") or "").lower():
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if e.code == 403 and "rate limit" in body.lower():
             raise BootstrapError(
                 "GitHub API rate limit exceeded. Retry later, or download "
                 f"{TSV_ASSET_NAME} manually from "
@@ -186,38 +197,6 @@ def _print_progress(downloaded: int, total: int | None) -> None:
     sys.stderr.flush()
 
 
-def build_db_from_tsv(tsv_path: Path, db_path: Path) -> None:
-    """
-    Run scripts/build_alias_db.py to convert the TSV into a SQLite DB.
-
-    Shells out rather than importing because build_alias_db.py is
-    written as a standalone script with a main(). Capturing its
-    output and printing it lets the user see the same build progress
-    they'd see running it manually.
-    """
-    # Locate the script. It lives at <repo>/scripts/build_alias_db.py,
-    # and this module lives at <repo>/src/bootstrap.py.
-    script = Path(__file__).resolve().parent.parent / "scripts" / "build_alias_db.py"
-    if not script.exists():
-        raise BootstrapError(
-            f"could not find build_alias_db.py at {script}. "
-            f"This is a development setup issue; the script should be in the repo."
-        )
-
-    print(f"  Building local database from TSV...", file=sys.stderr)
-    try:
-        # Stream output through so the user sees row-count progress.
-        subprocess.run(
-            [sys.executable, str(script), "--tsv", str(tsv_path), "--db", str(db_path)],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise BootstrapError(
-            f"build_alias_db.py exited with code {e.returncode}. "
-            f"The TSV may be malformed, or there's a bug in the build script."
-        )
-
-
 def ensure_db(db_path: Path | None = None, force: bool = False) -> Path:
     """
     Ensure a local DB exists, downloading and building it if needed.
@@ -253,7 +232,11 @@ def ensure_db(db_path: Path | None = None, force: bool = False) -> Path:
     try:
         url = find_latest_data_release_url()
         download_with_progress(url, tsv_path)
-        build_db_from_tsv(tsv_path, db_path)
+        print(f"  Building local database from TSV...", file=sys.stderr)
+        try:
+            build_db(tsv_path, db_path)
+        except (FileNotFoundError, ValueError) as e:
+            raise BootstrapError(f"build failed: {e}")
     finally:
         # Clean up the TSV regardless of whether the build succeeded.
         # On failure the user gets to retry without a stale TSV sitting around.

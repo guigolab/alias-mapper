@@ -17,32 +17,24 @@ assembly are auto-detected from the input by default.
 
 ## Install
 
-Clone the repo:
+Clone the repo and install the one Python dependency:
 
 ```bash
 git clone https://github.com/Max25R/alias-mapper.git
 cd alias-mapper
+pip3 install platformdirs
 ```
 
-Download the latest alias TSV from the data Release and build the
-local SQLite database from it. Data Releases are tagged
-`data-YYYY-MM-DD` (one per weekly build); find the most recent at
-[github.com/Max25R/alias-mapper/releases](https://github.com/Max25R/alias-mapper/releases)
-and substitute the tag below:
+That's it. The first time you run `convert`, the tool downloads the
+latest alias data (~33 MB) from the GitHub Releases and builds a
+local SQLite database (~260 MB) in your platform cache directory:
 
-```bash
-mkdir -p data
-curl -L -o data/aliases.tsv.gz \
-    https://github.com/Max25R/alias-mapper/releases/download/data-YYYY-MM-DD/aliases.tsv.gz
-python3 scripts/build_alias_db.py --tsv data/aliases.tsv.gz --db data/aliases.db
-```
+- macOS:   `~/Library/Caches/alias-mapper/aliases.db`
+- Linux:   `~/.cache/alias-mapper/aliases.db`
+- Windows: `%LOCALAPPDATA%\alias-mapper\Cache\aliases.db`
 
-The build step takes about a minute and produces a ~260 MB SQLite
-file at `data/aliases.db`. The CLI looks there by default; override
-with `--alias-db` if you've placed it elsewhere.
-
-The CLI itself is `src/alias_mapper.py`. No installation step yet —
-run it directly with `python3`.
+This takes about 1-2 minutes the first time. Subsequent runs use the
+cached database directly.
 
 ## Quickstart
 
@@ -63,7 +55,14 @@ table (those are passed through unchanged with a warning).
 
 ```
 alias-mapper convert <input> --to <convention> -o <output> [options]
+alias-mapper update
 ```
+
+### Subcommands
+
+- **`convert`** — translate one file from one convention to another.
+- **`update`** — re-download the latest alias data and rebuild the
+  cached database. Run this manually when you want newer data.
 
 ### Supported file types
 
@@ -93,17 +92,20 @@ python3 src/alias_mapper.py convert reference.fa \
     --from genbank --to sequence-name \
     --assembly GCA_963924405.1 \
     -o reference.renamed.fa
+
+# Refresh the cached alias data
+python3 src/alias_mapper.py update
 ```
 
-### Flags
+### Flags (`convert`)
 
-| Flag         | Required | Purpose                                              |
-| ------------ | -------- | ---------------------------------------------------- |
-| `--to`       | yes      | Target naming convention                             |
-| `-o`         | yes      | Output path                                          |
-| `--from`     | no       | Source convention. Auto-detected if absent           |
-| `--assembly` | no       | Assembly accession. Auto-detected if absent          |
-| `--alias-db` | no       | Path to the alias SQLite database                    |
+| Flag         | Required | Purpose                                                  |
+| ------------ | -------- | -------------------------------------------------------- |
+| `--to`       | yes      | Target naming convention                                 |
+| `-o`         | yes      | Output path                                              |
+| `--from`     | no       | Source convention. Auto-detected if absent               |
+| `--assembly` | no       | Assembly accession. Auto-detected if absent              |
+| `--alias-db` | no       | Path to a specific alias SQLite database (overrides cache) |
 
 ### Auto-detection
 
@@ -119,21 +121,6 @@ If a sequence name in the input isn't in the alias database, the line
 is written to the output unchanged and counted in the unmapped total.
 Five example names are printed at the end of the run so you can see
 what didn't translate.
-
-## Updating the alias database
-
-The alias data is rebuilt weekly from NCBI and published as a new
-`data-YYYY-MM-DD` Release. To pick up a newer version, re-run the
-install steps with a more recent tag:
-
-```bash
-curl -L -o data/aliases.tsv.gz \
-    https://github.com/Max25R/alias-mapper/releases/download/data-YYYY-MM-DD/aliases.tsv.gz
-python3 scripts/build_alias_db.py --tsv data/aliases.tsv.gz --db data/aliases.db
-```
-
-`build_alias_db.py` overwrites the existing DB, so no manual cleanup
-is needed.
 
 ## More
 

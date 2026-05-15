@@ -44,10 +44,14 @@ jobs:
           sudo mv datasets /usr/local/bin/
           datasets --version
 
-      # Step 5: Run the collection script and produce aliases.tsv.gz.
-      # Output goes to the repo root so the next steps can find it easily.
+      # Step 5: Run the collection script and produce aliases.tsv.gz
+      # plus a structured failures.tsv. Output goes to the repo root so the
+      # next steps can find it easily.
       - name: Run alias collection script
-        run: python scripts/collect_aliases.py --output aliases.tsv.gz
+        run: |
+          python scripts/collect_aliases.py \
+            --output aliases.tsv.gz \
+            --failures failures.tsv
 
       # Step 6: Build the SQLite database from the TSV.
       # This is the new step — converts the TSV into the normalized DB
@@ -57,6 +61,8 @@ jobs:
 
       # Step 7: Gzip the SQLite DB to reduce the Release asset size.
       # SQLite files compress well (typically 3-4x), making downloads faster.
+      # failures.tsv is left uncompressed — it's small and more useful as
+      # plain text (browser preview, quick inspection without downloading).
       - name: Compress the SQLite database
         run: gzip aliases.db
 
@@ -66,9 +72,11 @@ jobs:
         id: tag
         run: echo "tag=data-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      # Step 9: Create a GitHub Release and attach both the TSV and the
-      # gzipped SQLite DB. Users who want raw tabular data can grab the TSV;
-      # users who want the queryable DB grab aliases.db.gz.
+      # Step 9: Create a GitHub Release and attach the TSV, the gzipped
+      # SQLite DB, and the per-assembly failures log. Users who want raw
+      # tabular data grab the TSV; users who want the queryable DB grab
+      # aliases.db.gz; users investigating collection issues grab
+      # failures.tsv.
       - name: Publish data files as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -81,11 +89,16 @@ jobs:
 
             Assets:
               - `aliases.tsv.gz` — raw tabular data, gzipped.
-              - `aliases.db.gz`  — SQLite database (normalized schema, indexed
-                on accession), gzipped. Decompress before use:
+              - `aliases.db.gz`  — SQLite database (normalized schema,
+                indexed on accession), gzipped. Decompress before use:
                 `gunzip aliases.db.gz`.
+              - `failures.tsv`   — per-assembly failure log. One row per
+                assembly that failed during collection, with categorical
+                reason (e.g. `http_error`, `url_error`, `empty_report`)
+                and detail message.
 
             Generated automatically by the `Weekly alias data update` workflow.
           files: |
             aliases.tsv.gz
             aliases.db.gz
+            failures.tsv

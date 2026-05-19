@@ -14,6 +14,16 @@ Workflow (per Emilio):
   4. Pick the 50 longest molecules and append rows to the TSV.
   5. Gzip the final TSV.
 
+HTTP behavior:
+  - 404/410 are treated as permanent (the assembly genuinely doesn't
+    exist at the expected path; fall through to the parent-directory
+    fallback or give up).
+  - 429 (rate-limited) and 5xx server errors are retried with
+    exponential backoff.
+  - Connection-level failures (timeouts, DNS, TLS) are retried with
+    the same backoff.
+  - Other 4xx codes (e.g. 403) are treated as permanent.
+
 Usage:
     python3 collect_aliases.py --output ../data/aliases.tsv.gz
     python3 collect_aliases.py --output ../data/aliases.tsv.gz --limit 10
@@ -23,19 +33,17 @@ import argparse
 import csv
 import gzip
 import json
+import random
 import re
 import ssl
 import subprocess
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
 
 # -- SSL setup -------------------------------------------------------------
-# On some macOS Python installs, the system cert bundle isn't trusted by
-# urllib (or there's a TLS-inspecting middlebox on the network). We build
-# an SSL context that uses the certifi bundle if available; otherwise we
-# fall back to the system default.
 try:
     import certifi
     SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -44,40 +52,70 @@ except ImportError:
 # --------------------------------------------------------------------------
 
 TSV_COLUMNS = [
-    "ACCESSION",
-    "ASSEMBLY_NAME",
-    "GENBANK_ACC",
-    "REFSEQ_ACC",
-    "SEQUENCE_NAME",
-    "ASSIGNED_MOLECULE",
-    "UCSC_NAME",
-    "LENGTH",
+    "ACCESSION", "ASSEMBLY_NAME", "GENBANK_ACC", "REFSEQ_ACC",
+    "SEQUENCE_NAME", "ASSIGNED_MOLECULE", "UCSC_NAME", "LENGTH",
 ]
 
-FAILURE_COLUMNS = [
-    "ACCESSION",
-    "ASSEMBLY_NAME",
-    "STAGE",
-    "REASON",
-    "DETAIL",
-]
+FAILURE_COLUMNS = ["ACCESSION", "ASSEMBLY_NAME", "STAGE", "REASON", "DETAIL"]
 
 FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/genomes/all"
 HTTP_HEADERS = {"User-Agent": "alias-mapper/0.1 (https://github.com/Max25R/alias-mapper)"}
 
+# HTTP error classification.
+PERMANENT_HTTP_CODES = frozenset({404, 410})
+RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
-def http_get(url, timeout=60):
-    req = urllib.request.Request(url, headers=HTTP_HEADERS)
-    return urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT)
+# Retry policy: 3 attempts, exponential backoff with jitter.
+MAX_ATTEMPTS = 3
+BASE_BACKOFF_SECONDS = 2.0
+
+
+class PermanentHTTPError(Exception):
+    """Definitive failure: 404/410, or non-retryable 4xx. Don't retry."""
+    def __init__(self, code: int, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+class TransientHTTPError(Exception):
+    """All retries exhausted on transient errors. Worth trying again next week."""
+
+
+def http_get_with_retry(url: str, timeout: int = 60) -> str:
+    """
+    Fetch a URL with retry on transient errors.
+
+    Returns response body text on success.
+    Raises PermanentHTTPError on 404/410/non-retryable 4xx.
+    Raises TransientHTTPError if all retries are exhausted.
+    """
+    last_detail = ""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            req = urllib.request.Request(url, headers=HTTP_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout, context=SSL_CONTEXT) as r:
+                return r.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code in PERMANENT_HTTP_CODES:
+                raise PermanentHTTPError(e.code, f"HTTP {e.code}: {e.reason}")
+            if e.code in RETRYABLE_HTTP_CODES:
+                last_detail = f"HTTP {e.code}: {e.reason}"
+            else:
+                raise PermanentHTTPError(e.code, f"HTTP {e.code}: {e.reason}")
+        except urllib.error.URLError as e:
+            last_detail = f"URLError: {e.reason}"
+
+        if attempt < MAX_ATTEMPTS:
+            sleep_for = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            sleep_for += random.uniform(0, sleep_for / 2)
+            time.sleep(sleep_for)
+
+    raise TransientHTTPError(f"all {MAX_ATTEMPTS} attempts failed for {url}: {last_detail}")
 
 
 def list_eukaryotic_assemblies(limit=None):
     print("Fetching eukaryotic assembly list from NCBI...", file=sys.stderr)
-    cmd = [
-        "datasets", "summary", "genome",
-        "taxon", "eukaryota",
-        "--as-json-lines",
-    ]
+    cmd = ["datasets", "summary", "genome", "taxon", "eukaryota", "--as-json-lines"]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
     assemblies = []
@@ -110,50 +148,55 @@ def stream_assembly_report(folder_url, accession):
     """
     Fetch the assembly_report.txt for one assembly.
 
-    Returns (text, None) on success, or (None, (reason, detail)) on
-    failure. `reason` is a short categorical string; `detail` is the
-    underlying exception message or empty string.
+    Returns (text, None) on success, or (None, (reason, detail)) on failure.
+
+    Failure categories:
+      not_found              - confirmed 404/410. Permanent.
+      http_error_permanent   - non-404 4xx (e.g. 403). Permanent.
+      transient_exhausted    - retries used up on 5xx/429/connection.
+      folder_not_found       - parent directory listing didn't contain accession.
     """
     folder_name = folder_url.rstrip("/").split("/")[-1]
     direct_url = folder_url + folder_name + "_assembly_report.txt"
 
-    # Attempt 1: the predicted direct URL.
+    # Attempt 1: predicted direct URL.
     try:
-        with http_get(direct_url) as r:
-            return r.read().decode("utf-8", errors="replace"), None
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            return None, ("http_error", f"HTTP {e.code} on direct URL: {e}")
-        # 404 falls through to the directory-listing fallback.
-    except urllib.error.URLError as e:
-        # DNS, connection refused, timeout, TLS error, etc.
-        return None, ("url_error", f"URLError on direct URL: {e.reason}")
+        return http_get_with_retry(direct_url), None
+    except PermanentHTTPError as e:
+        if e.code not in PERMANENT_HTTP_CODES:
+            return None, ("http_error_permanent", str(e))
+        # 404/410: fall through to parent-directory fallback.
+    except TransientHTTPError as e:
+        return None, ("transient_exhausted", str(e))
 
-    # Attempt 2: list the parent directory, find the real folder name,
-    # try again. NCBI sometimes names folders slightly differently from
-    # what build_ftp_folder predicts.
+    # Attempt 2: parent directory listing.
     parent = "/".join(folder_url.rstrip("/").split("/")[:-1]) + "/"
     try:
-        with http_get(parent) as r:
-            html = r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        return None, ("http_error", f"HTTP {e.code} listing parent: {e}")
-    except urllib.error.URLError as e:
-        return None, ("url_error", f"URLError listing parent: {e.reason}")
+        html = http_get_with_retry(parent)
+    except PermanentHTTPError as e:
+        if e.code in PERMANENT_HTTP_CODES:
+            return None, ("not_found", f"parent directory {parent} returned {e.code}")
+        return None, ("http_error_permanent", str(e))
+    except TransientHTTPError as e:
+        return None, ("transient_exhausted", str(e))
 
     match = re.search(rf'href="({re.escape(accession)}[^"]*?)/"', html)
     if not match:
-        return None, ("folder_not_found", "accession not present in parent directory listing")
+        return None, ("not_found",
+                      f"accession not present in parent directory listing at {parent}")
 
     real_folder = match.group(1)
     real_url = f"{parent}{real_folder}/{real_folder}_assembly_report.txt"
+
+    # Attempt 3: resolved URL.
     try:
-        with http_get(real_url) as r:
-            return r.read().decode("utf-8", errors="replace"), None
-    except urllib.error.HTTPError as e:
-        return None, ("http_error", f"HTTP {e.code} on resolved URL: {e}")
-    except urllib.error.URLError as e:
-        return None, ("url_error", f"URLError on resolved URL: {e.reason}")
+        return http_get_with_retry(real_url), None
+    except PermanentHTTPError as e:
+        if e.code in PERMANENT_HTTP_CODES:
+            return None, ("not_found", f"{real_url} returned {e.code}")
+        return None, ("http_error_permanent", str(e))
+    except TransientHTTPError as e:
+        return None, ("transient_exhausted", str(e))
 
 
 def parse_assembly_report(text):
@@ -205,11 +248,9 @@ def row_to_tsv(row, accession, assembly_name):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", "-o", required=True)
-    parser.add_argument(
-        "--failures", default=None,
+    parser.add_argument("--failures", default=None,
         help="Path to write per-assembly failure log as TSV. "
-             "Defaults to <output-dir>/failures.tsv.",
-    )
+             "Defaults to <output-dir>/failures.tsv.")
     parser.add_argument("--limit", "-n", type=int, default=None)
     parser.add_argument("--top", type=int, default=50)
     args = parser.parse_args()
@@ -217,10 +258,8 @@ def main():
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    failures_path = (
-        Path(args.failures) if args.failures
-        else output_path.parent / "failures.tsv"
-    )
+    failures_path = (Path(args.failures) if args.failures
+                     else output_path.parent / "failures.tsv")
 
     assemblies = list_eukaryotic_assemblies(limit=args.limit)
 
@@ -237,11 +276,8 @@ def main():
     def log_failure(acc, name, stage, reason, detail):
         nonlocal n_fail
         fail_writer.writerow({
-            "ACCESSION":     acc,
-            "ASSEMBLY_NAME": name,
-            "STAGE":         stage,
-            "REASON":        reason,
-            "DETAIL":        detail,
+            "ACCESSION": acc, "ASSEMBLY_NAME": name, "STAGE": stage,
+            "REASON": reason, "DETAIL": detail,
         })
         fail_counts[reason] = fail_counts.get(reason, 0) + 1
         n_fail += 1

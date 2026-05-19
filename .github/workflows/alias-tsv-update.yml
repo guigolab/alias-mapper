@@ -20,6 +20,12 @@ permissions:
 jobs:
   build-data:
     runs-on: ubuntu-latest
+    # Job timeout. GitHub Actions defaults to 6 hours and the May 11/18 run
+    # exceeded that. The collection script is bottlenecked on NCBI's FTP
+    # response time, which varies. 12h leaves comfortable margin over
+    # the typical 4-5 hour runtime; if this becomes regularly tight,
+    # the incremental-update workflow (#1) is the real fix.
+    timeout-minutes: 720
     steps:
       # Step 1: Pull the repo's code onto the runner so our scripts are available.
       - name: Check out repository

@@ -79,8 +79,8 @@ If no clear winner emerges (fewer than 5 absolute matches, or winner
 fails to beat the runner-up by ≥2×), detection refuses to commit and
 the user must supply `--from` explicitly.
 
-Stretch (deferred to v2): per-line resolution for files that mix
-conventions across rows.
+Not supported: per-line resolution for files that mix conventions
+across rows. One convention per file.
 
 ### Assembly scope: auto-detect, overridable
 
@@ -101,17 +101,18 @@ contigs shouldn't kill the run). Pass-through preserves data while
 making issues visible.
 
 `--strict` (error on any unmapped name) and `--skip-unknown` (drop
-unmapped rows) are not implemented in v1 but could be added without
-changing the default behaviour.
+unmapped rows) are not currently implemented but could be added
+without changing the default behaviour.
 
-### Single-file mode in v1, multi-file in v2
+### Single-file mode today, multi-file on the horizon
 
-v1 takes one input file per invocation. A common real-world workflow
-has one FASTA and several GFF files for the same assembly; running the
-tool repeatedly accepts the table-load cost each time. v2 adds the
-`align` subcommand, which takes multiple files and a target convention
-(specified directly or inferred from a reference FASTA), loads the
-alias table once, and translates all files in one pass.
+Today `convert` takes one input file per invocation. A common
+real-world workflow has one FASTA and several GFF files for the same
+assembly; running the tool repeatedly accepts the table-load cost
+each time. The planned `align` subcommand will take multiple files
+and a target convention (specified directly or inferred from a
+reference FASTA), load the alias table once, and translate all files
+in one pass.
 
 ## Architecture
 
@@ -120,37 +121,37 @@ so each can change independently:
 
 ```
                  user types command
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │   alias_mapper.py    │   parses args, orchestrates,
-              │                      │   prints user-facing messages
-              └──────┬──────────┬────┘
-                     │          │
-            ┌────────▼──┐    ┌──▼──────────────┐
-            │ formats/  │    │ alias_source.py │
-            │           │    │                 │
-            │ - GffT.   │    │ - get_map
-            │ - FastaT. │    │ - detect_convention
-            │ - dispatch│    │ - detect_assembly
-            └─────┬─────┘    └─────────┬───────┘
-                  │                    │
-                  │ (per-line          │ (SQL queries)
-                  │  translation)      │
-                  ▼                    ▼
+                         |
+                         v
+              +----------------------+
+              |        cli.py        |   parses args, orchestrates,
+              |                      |   prints user-facing messages
+              +------+----------+----+
+                     |          |
+            +--------v--+    +--v--------------+
+            | formats/  |    | alias_source.py |
+            |           |    |                 |
+            | - GffT.   |    | - get_map       |
+            | - FastaT. |    | - detect_convention
+            | - dispatch|    | - detect_assembly
+            +-----+-----+    +---------+-------+
+                  |                    |
+                  | (per-line          | (SQL queries)
+                  |  translation)      |
+                  v                    v
               input file           SQLite DB
 ```
 
-**`alias_mapper.py`** is the entry point. It parses arguments, decides
+**`cli.py`** is the entry point. It parses arguments, decides
 whether to sample the input for auto-detection, calls the right pieces
 in the right order, and translates internal errors into user-facing
 messages.
 
 **`alias_source.py`** wraps the data. The `AliasSource` abstract base
 class defines the interface (`get_map`, `detect_convention`,
-`detect_assembly`, `assembly_exists`); `SqliteAliasSource` is the v1
-implementation. When the hosted API ships, `HttpAliasSource` will
-implement the same interface and the CLI will pick one based on
+`detect_assembly`, `assembly_exists`); `SqliteAliasSource` is the
+current implementation. When the hosted API ships, `HttpAliasSource`
+will implement the same interface and the CLI will pick one based on
 configuration. No code outside this module knows SQLite is involved.
 
 **`formats/`** holds one translator class per file format. Each
@@ -171,7 +172,7 @@ plus one line in the dict.
 
 ## Edge cases
 
-Status column: ✓ implemented in v1, ◯ planned for v1.x or v2.
+Status column: ✓ currently implemented, ◯ planned but not yet built.
 
 ### Input files
 

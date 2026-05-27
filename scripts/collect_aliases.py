@@ -35,6 +35,7 @@ import argparse
 import csv
 import gzip
 import os
+import re
 import ssl
 import sys
 import time
@@ -88,9 +89,11 @@ TSV_COLUMNS = [
     "sequence_names", "genbank_seq_accs", "refseq_seq_accs",
     "ucsc_names", "assigned_molecules", "lengths",
 ]
-FAILURE_COLUMNS = ["ACCESSION", "ASSEMBLY_NAME", "STAGE", "REASON", "DETAIL"]
+FAILURE_COLUMNS = [
+    "accession", "assembly_name", "stage", "reason", "detail",
+]
 HISTORICAL_COLUMNS = [
-    "ACCESSION", "STATUS", "REPLACED_BY", "SUPPRESSION_DATE", "ASSEMBLY_NAME",
+    "accession", "status", "replaced_by", "suppression_date", "assembly_name",
 ]
 
 # Coverage cap policy.
@@ -422,7 +425,6 @@ def parse_assembly_report(text: str) -> list[dict[str, str]]:
     Parse an assembly_report.txt into row dicts keyed by the column
     header from the file (Sequence-Name, GenBank-Accn, RefSeq-Accn, etc).
     """
-    import re
     header_cols = None
     rows = []
     for line in text.splitlines():
@@ -531,11 +533,11 @@ def write_historical_tsv(
             if replaced_by:
                 n_with_replacement += 1
             writer.writerow({
-                "ACCESSION": h.accession,
-                "STATUS": h.status,
-                "REPLACED_BY": replaced_by,
-                "SUPPRESSION_DATE": h.asm_not_live_date,
-                "ASSEMBLY_NAME": h.assembly_name,
+                "accession": h.accession,
+                "status": h.status,
+                "replaced_by": replaced_by,
+                "suppression_date": h.asm_not_live_date,
+                "assembly_name": h.assembly_name,
             })
             n_written += 1
     finally:
@@ -641,9 +643,9 @@ def run_collection(
                         file=sys.stderr,
                     )
                     fail_writer.writerow({
-                        "ACCESSION": entry.genbank_acc,
-                        "ASSEMBLY_NAME": entry.assembly_name,
-                        "STAGE": stage, "REASON": reason, "DETAIL": detail,
+                        "accession": entry.genbank_acc,
+                        "assembly_name": entry.assembly_name,
+                        "stage": stage, "reason": reason, "detail": detail,
                     })
                     fail_counts[reason] = fail_counts.get(reason, 0) + 1
                     n_fail += 1

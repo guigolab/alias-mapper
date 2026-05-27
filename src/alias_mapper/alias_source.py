@@ -20,7 +20,11 @@ import sys
 
 # Bumped whenever the SQLite schema changes incompatibly. Mirrored in
 # build_alias_db.SCHEMA_VERSION; both must agree at runtime.
-CURRENT_SCHEMA_VERSION = "2"
+#
+# Stored as int rather than str so future versions can compare
+# numerically ("is this cache older than v3?") without lexical pitfalls
+# ("10" < "2" as strings).
+CURRENT_SCHEMA_VERSION = 2
 
 
 # Convention column names in the aliases table. Kept here (not in the
@@ -50,7 +54,7 @@ class StaleSchemaError(Exception):
 
     Caught by bootstrap.ensure_db, which responds by forcing a rebuild.
     """
-    def __init__(self, found: str | None, expected: str):
+    def __init__(self, found: int | None, expected: int):
         self.found = found
         self.expected = expected
         super().__init__(
@@ -160,6 +164,11 @@ def verify_schema_version(db_path: Path) -> None:
 
     Cheap: opens the DB, runs one SELECT, closes. Safe to call before
     any other DB work.
+
+    Note: _meta.value is stored as TEXT in SQLite (it's a generic
+    key/value table), so we parse the version back to int before
+    comparing. A non-numeric value lands as StaleSchemaError(found=None)
+    — same as a missing _meta table, same rebuild path.
     """
     if not db_path.exists():
         # Not stale, just absent. Caller decides whether to build.
@@ -175,7 +184,12 @@ def verify_schema_version(db_path: Path) -> None:
         except sqlite3.OperationalError:
             # _meta table doesn't exist — this is a pre-v2 DB.
             raise StaleSchemaError(found=None, expected=CURRENT_SCHEMA_VERSION)
-        found = row[0] if row else None
+        try:
+            found = int(row[0]) if row else None
+        except (TypeError, ValueError):
+            # _meta.value isn't a number — corrupted or from some
+            # incompatible build script. Treat as stale and rebuild.
+            found = None
         if found != CURRENT_SCHEMA_VERSION:
             raise StaleSchemaError(found=found, expected=CURRENT_SCHEMA_VERSION)
     finally:

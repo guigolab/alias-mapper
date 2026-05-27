@@ -39,7 +39,10 @@ from pathlib import Path
 # Bumped whenever the SQLite schema changes incompatibly. Kept here
 # rather than imported from alias_source to avoid a circular import
 # at script-invocation time; alias_source imports the same number.
-SCHEMA_VERSION = "2"
+#
+# Stored as int in `_meta` so future versions can compare numerically
+# ("is this cache older than v3?") without string-vs-numeric pitfalls.
+SCHEMA_VERSION = 2
 
 CREATE_META_SQL = """
 CREATE TABLE _meta (
@@ -243,7 +246,7 @@ def build_db(tsv_path: Path, db_path: Path, batch_size: int = 10_000) -> None:
     # Write meta first so a corrupted/partial DB is still recognizable
     # as the right schema version (downstream rebuild can be confident).
     cur.execute("INSERT INTO _meta (key, value) VALUES (?, ?)",
-                ("schema_version", SCHEMA_VERSION))
+                ("schema_version", str(SCHEMA_VERSION)))
     cur.execute("INSERT INTO _meta (key, value) VALUES (?, ?)",
                 ("build_date", today_iso))
 

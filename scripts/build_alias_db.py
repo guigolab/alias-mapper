@@ -2,13 +2,20 @@
 """
 scripts/build_alias_db.py
 -------------------------
-Thin CLI wrapper around alias_mapper.build_alias_db. Kept here so the
-GitHub Actions workflow (and anyone else referencing the script path)
-keeps working after the v1 packaging restructure.
+Thin CLI wrapper around `alias_mapper.build_alias_db`. Used for manual
+debugging — "I have a TSV on disk, build me a SQLite from it":
 
-The actual logic lives in alias_mapper.build_alias_db.build_db; this
-file just makes sure the script is on the Python path and invokes
-its CLI entry point.
+    python3 scripts/build_alias_db.py --tsv aliases.tsv.gz --db out.db
+
+Not called by CI anymore. The weekly workflow only runs
+scripts/collect_aliases.py, and the CLI's bootstrap flow imports
+build_db directly from the package on first run. This wrapper exists
+for cases where you want to rebuild a DB from a Release artifact
+without going through the CLI's full bootstrap.
+
+The actual logic lives in `alias_mapper.build_alias_db.build_db`; this
+file just makes sure the package is importable from a source checkout
+and invokes the CLI entry point.
 """
 
 import sys

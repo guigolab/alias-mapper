@@ -236,3 +236,6 @@ test_new.gff
 test_new.gtf
 test.fa
 test_new.fa
+
+# Build outputs from collection scripts
+data/

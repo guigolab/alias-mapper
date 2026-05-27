@@ -146,10 +146,15 @@ def _fmt_bytes(n: float) -> str:
 
 
 def _download_to(url: str, dest: Path) -> None:
-    """Download with progress to stderr, atomic-rename on completion."""
+    """Download with progress to stderr, atomic-rename on completion.
+
+    Reads the SSL context fresh from the package's _ssl module so the
+    --insecure flag's mutation is picked up automatically.
+    """
+    from alias_mapper import _ssl as _ssl_module
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     req = urllib.request.Request(url, headers=HTTP_HEADERS)
-    with urllib.request.urlopen(req, timeout=120, context=SSL_CONTEXT) as r:
+    with urllib.request.urlopen(req, timeout=120, context=_ssl_module.SSL_CONTEXT) as r:
         total = int(r.headers.get("Content-Length", "0")) or None
         downloaded = 0
         last_print = time.monotonic()
@@ -731,14 +736,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # --insecure overrides the SSL context globally for both _http and us.
+    # --insecure overrides the SSL context globally by mutating the
+    # package's _ssl module. _http.http_get_with_retry and our own
+    # _download_to both read the context fresh from that module on
+    # each call, so this single mutation propagates everywhere.
     if args.insecure:
-        import _http
-        _http.SSL_CONTEXT = ssl._create_unverified_context()
-        # Also affects our own _download_to(), which captures SSL_CONTEXT
-        # from this module's import. Rebind:
-        global SSL_CONTEXT  # type: ignore[misc]
-        SSL_CONTEXT = _http.SSL_CONTEXT
+        from alias_mapper import _ssl as _ssl_module
+        _ssl_module.SSL_CONTEXT = ssl._create_unverified_context()
         print(
             "WARNING: SSL certificate verification disabled (--insecure).",
             file=sys.stderr,

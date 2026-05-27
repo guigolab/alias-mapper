@@ -20,12 +20,12 @@ permissions:
 jobs:
   build-data:
     runs-on: ubuntu-latest
-    # Job timeout. GitHub Actions defaults to 6 hours and the May 11/18 run
-    # exceeded that. The collection script is bottlenecked on NCBI's FTP
-    # response time, which varies. 12h leaves comfortable margin over
-    # the typical 4-5 hour runtime; if this becomes regularly tight,
-    # the incremental-update workflow (#1) is the real fix.
-    timeout-minutes: 720
+    # Job timeout. The new summary-file-driven pipeline reads four NCBI
+    # assembly_summary files instead of enumerating every assembly via
+    # the `datasets` CLI, then fetches per-assembly reports in parallel.
+    # Expected runtime is much lower than the v1 6+ hour budget; 6h is
+    # a safe ceiling that won't bite us on a slow-NCBI day.
+    timeout-minutes: 360
     steps:
       # Step 1: Pull the repo's code onto the runner so our scripts are available.
       - name: Check out repository
@@ -37,74 +37,70 @@ jobs:
         with:
           python-version: "3.13"
 
-      # Step 3: Install certifi (needed for HTTPS in the collection script).
+      # Step 3: Install Python dependencies.
+      # - certifi: CA bundle for HTTPS verification (Ubuntu's system trust
+      #   is fine for NCBI/GitHub, but certifi keeps the runner aligned
+      #   with the local dev environment).
+      # - truststore: harmless no-op on a runner with a normal cert chain;
+      #   present so local and CI use the same code path.
       - name: Install Python dependencies
-        run: pip install certifi
+        run: pip install certifi truststore
 
-      # Step 4: Download the NCBI Datasets CLI binary for Linux.
-      # The runner is Ubuntu, so we grab the linux-amd64 build from NCBI's FTP.
-      - name: Install NCBI Datasets CLI
-        run: |
-          curl -o datasets 'https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets'
-          chmod +x datasets
-          sudo mv datasets /usr/local/bin/
-          datasets --version
-
-      # Step 5: Run the collection script and produce aliases.tsv.gz
-      # plus a structured failures.tsv. Output goes to the repo root so the
-      # next steps can find it easily.
+      # Step 4: Run the collection script.
+      # --no-cache forces the script to stream the four NCBI summary
+      # files directly rather than persisting them to disk. The local
+      # dev cache is a dev convenience only; CI always goes to source
+      # so each run reflects the current state of NCBI's indexes.
+      # Outputs three artifacts to the repo root:
+      #   - aliases.tsv.gz   (merged-row per-assembly data, schema v2)
+      #   - historical.tsv.gz (dead-accession lookup, used by CLI for
+      #                       "this was suppressed by X" error messages)
+      #   - failures.tsv     (per-assembly collection failure log)
       - name: Run alias collection script
         run: |
           python scripts/collect_aliases.py \
+            --no-cache \
             --output aliases.tsv.gz \
-            --failures failures.tsv
+            --failures failures.tsv \
+            --historical-output historical.tsv.gz
 
-      # Step 6: Build the SQLite database from the TSV.
-      # This is the new step — converts the TSV into the normalized DB
-      # that the alias-mapper CLI reads from.
-      - name: Build SQLite database from TSV
-        run: python scripts/build_alias_db.py --tsv aliases.tsv.gz --db aliases.db
-
-      # Step 7: Gzip the SQLite DB to reduce the Release asset size.
-      # SQLite files compress well (typically 3-4x), making downloads faster.
-      # failures.tsv is left uncompressed — it's small and more useful as
-      # plain text (browser preview, quick inspection without downloading).
-      - name: Compress the SQLite database
-        run: gzip aliases.db
-
-      # Step 8: Compute today's date in YYYY-MM-DD form, save it as a
-      # variable the next step can use as the Release tag.
+      # Step 5: Compute today's date in YYYY-MM-DD form for the Release tag.
       - name: Compute Release tag
         id: tag
         run: echo "tag=data-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      # Step 9: Create a GitHub Release and attach the TSV, the gzipped
-      # SQLite DB, and the per-assembly failures log. Users who want raw
-      # tabular data grab the TSV; users who want the queryable DB grab
-      # aliases.db.gz; users investigating collection issues grab
-      # failures.tsv.
+      # Step 6: Create a GitHub Release and attach the artifacts.
+      # No DB asset: the client builds SQLite from the TSV on first run
+      # via the CLI's bootstrap flow. Shipping a prebuilt DB would waste
+      # space and bake in an SQLite version that may not match the
+      # client's Python environment.
       - name: Publish data files as GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "Alias data - ${{ steps.tag.outputs.tag }}"
           body: |
-            Weekly snapshot of alias names for the 50 longest molecules of
-            every eukaryotic genome assembly available on NCBI
-            (GenBank + RefSeq).
+            Weekly snapshot of alias mappings for eukaryotic genome
+            assemblies (GenBank + RefSeq), built from NCBI's four
+            assembly_summary files.
 
             Assets:
-              - `aliases.tsv.gz` — raw tabular data, gzipped.
-              - `aliases.db.gz`  — SQLite database (normalized schema,
-                indexed on accession), gzipped. Decompress before use:
-                `gunzip aliases.db.gz`.
-              - `failures.tsv`   — per-assembly failure log. One row per
-                assembly that failed during collection, with categorical
-                reason (e.g. `http_error`, `url_error`, `empty_report`)
-                and detail message.
+              - `aliases.tsv.gz`     — merged-row per-assembly data
+                (schema v2). One row per assembly; per-molecule data
+                lives in comma-separated, position-aligned list
+                columns. The CLI's bootstrap flow downloads this and
+                builds a local SQLite cache on first run.
+              - `historical.tsv.gz`  — dead-accession lookup with
+                suppression dates and replacements where known. Used
+                by the CLI to give useful error messages when a user
+                references a suppressed/replaced accession.
+              - `failures.tsv`       — per-assembly failure log. One
+                row per assembly that failed during collection, with
+                categorical reason and detail message.
 
-            Generated automatically by the `Weekly alias data update` workflow.
+            Generated automatically by the `Weekly alias data update`
+            workflow.
           files: |
             aliases.tsv.gz
-            aliases.db.gz
+            historical.tsv.gz
             failures.tsv

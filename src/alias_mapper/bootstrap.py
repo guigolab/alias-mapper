@@ -29,6 +29,8 @@ from pathlib import Path
 import platformdirs
 
 from .build_alias_db import build_db
+from .alias_source import StaleSchemaError, verify_schema_version
+from ._ssl import SSL_CONTEXT
 
 
 # GitHub repo coordinates. Constants up here so they're easy to change
@@ -77,7 +79,7 @@ def _http_get_json(url: str):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = ""
@@ -151,7 +153,7 @@ def download_with_progress(url: str, dest: Path) -> None:
 
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as response:
             total_str = response.headers.get("Content-Length")
             total = int(total_str) if total_str else None
             downloaded = 0
@@ -217,7 +219,19 @@ def ensure_db(db_path: Path | None = None, force: bool = False) -> Path:
         db_path = default_cache_path()
 
     if db_path.exists() and not force:
-        return db_path
+        # Check schema version; a stale cache forces a rebuild even
+        # if the user didn't ask for one. This is the silent-upgrade
+        # path when a user updates the CLI and their old DB no longer
+        # matches the expected schema.
+        try:
+            verify_schema_version(db_path)
+            return db_path
+        except StaleSchemaError as e:
+            print(
+                f"Cached alias DB has stale schema ({e}); rebuilding...",
+                file=sys.stderr,
+            )
+            force = True
 
     if force and db_path.exists():
         print(f"Refreshing alias database at {db_path}", file=sys.stderr)

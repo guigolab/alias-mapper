@@ -17,39 +17,39 @@ assembly are auto-detected from the input by default.
 
 ## Install
 
-Clone the repo and install the one Python dependency:
-
 ```bash
-git clone https://github.com/Max25R/alias-mapper.git
-cd alias-mapper
-pip3 install platformdirs
+pip install git+https://github.com/Max25R/alias-mapper.git
 ```
 
-That's it. The first time you run `convert`, the tool downloads the
-latest alias data (~33 MB) from the GitHub Releases and builds a
-local SQLite database (~260 MB) in your platform cache directory:
+On networks that perform TLS inspection (corporate / institutional,
+e.g. CRG), also install the `trusted` extra so the tool uses the
+system keychain for cert verification:
+
+```bash
+pip install "alias-mapper[trusted] @ git+https://github.com/Max25R/alias-mapper.git"
+```
+
+The first time you run `convert`, the tool downloads the latest alias
+data (~35 MB) from GitHub Releases and builds a local SQLite database
+in your platform cache directory:
 
 - macOS:   `~/Library/Caches/alias-mapper/aliases.db`
 - Linux:   `~/.cache/alias-mapper/aliases.db`
 - Windows: `%LOCALAPPDATA%\alias-mapper\Cache\aliases.db`
 
-This takes about 1-2 minutes the first time. Subsequent runs use the
-cached database directly.
+First-run setup takes about a minute. Subsequent runs use the cached
+database directly. If the database schema changes in a newer release,
+the cache is rebuilt automatically.
 
 ## Quickstart
 
-Translate a GFF from whatever it uses now to UCSC names, with
-auto-detection figuring out the rest:
-
 ```bash
-python3 src/alias_mapper.py convert annotations.gff \
-    --to ucsc \
-    -o annotations.ucsc.gff
+alias-mapper convert annotations.gff --to ucsc -o annotations.ucsc.gff
 ```
 
-Output goes to `annotations.ucsc.gff`. A summary line on stderr reports
-how many rows were translated and how many had names not in the alias
-table (those are passed through unchanged with a warning).
+A summary on stderr reports how many rows were translated and how many
+had sequence names not in the alias database (those rows are passed
+through unchanged with a warning).
 
 ## Usage
 
@@ -62,7 +62,7 @@ alias-mapper update
 
 - **`convert`** — translate one file from one convention to another.
 - **`update`** — re-download the latest alias data and rebuild the
-  cached database. Run this manually when you want newer data.
+  cached database. Run manually when you want newer data.
 
 ### Supported file types
 
@@ -76,25 +76,25 @@ GFF (`.gff`, `.gff3`), GTF (`.gtf`), and FASTA (`.fa`, `.fasta`,
 ### Examples
 
 ```bash
-# Translate explicitly from RefSeq to UCSC
-python3 src/alias_mapper.py convert annotations.gff \
+# Translate from RefSeq to UCSC explicitly
+alias-mapper convert annotations.gff \
     --from refseq --to ucsc \
     -o out.gff
 
 # Pin the assembly when auto-detection is ambiguous
-python3 src/alias_mapper.py convert annotations.gff \
+alias-mapper convert annotations.gff \
     --to ucsc \
     --assembly GCF_000001405.40 \
     -o out.gff
 
 # FASTA — same syntax, different file
-python3 src/alias_mapper.py convert reference.fa \
+alias-mapper convert reference.fa \
     --from genbank --to sequence-name \
     --assembly GCA_963924405.1 \
     -o reference.renamed.fa
 
 # Refresh the cached alias data
-python3 src/alias_mapper.py update
+alias-mapper update
 ```
 
 ### Flags (`convert`)
@@ -119,10 +119,21 @@ errors out and asks for the flag explicitly.
 
 If a sequence name in the input isn't in the alias database, the line
 is written to the output unchanged and counted in the unmapped total.
-Five example names are printed at the end of the run so you can see
-what didn't translate.
+Up to five example names are printed at the end of the run so you can
+see what didn't translate.
+
+## Data updates
+
+A weekly GitHub Actions workflow rebuilds the alias dataset from
+NCBI's published assembly summaries and publishes it as a
+`data-YYYY-MM-DD` GitHub Release. Each release ships three artifacts:
+
+- `aliases.tsv.gz` — the merged-row alias data the CLI consumes.
+- `historical.tsv.gz` — dead-accession lookup with suppression dates
+  and best-effort replacements.
+- `failures.tsv` — per-assembly collection failure log.
 
 ## More
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture, design
-decisions, and v2 direction.
+See [`docs/design.md`](docs/design.md) for architecture, design
+decisions, and direction.

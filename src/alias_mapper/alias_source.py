@@ -18,6 +18,11 @@ import sqlite3
 import sys
 
 
+# Bumped whenever the SQLite schema changes incompatibly. Mirrored in
+# build_alias_db.SCHEMA_VERSION; both must agree at runtime.
+CURRENT_SCHEMA_VERSION = "2"
+
+
 # Convention column names in the aliases table. Kept here (not in the
 # CLI) so SqliteAliasSource can iterate over them during detection
 # without the CLI having to pass the list in.
@@ -36,6 +41,21 @@ class AliasNotFoundError(Exception):
 
 class AssemblyNotFoundError(Exception):
     """Raised when the requested assembly accession doesn't exist in the source."""
+
+
+class StaleSchemaError(Exception):
+    """
+    Raised when the local DB exists but was built against an older schema
+    (or by a build script that didn't write _meta at all).
+
+    Caught by bootstrap.ensure_db, which responds by forcing a rebuild.
+    """
+    def __init__(self, found: str | None, expected: str):
+        self.found = found
+        self.expected = expected
+        super().__init__(
+            f"DB schema is {found!r}, expected {expected!r}"
+        )
 
 
 class LowConfidenceDetection(Exception):
@@ -130,12 +150,47 @@ def _is_confident(winner_score: int, runner_up_score: int) -> bool:
     return (winner_score / runner_up_score) >= MIN_RATIO_OVER_RUNNER_UP
 
 
+def verify_schema_version(db_path: Path) -> None:
+    """
+    Confirm the SQLite at db_path matches CURRENT_SCHEMA_VERSION.
+
+    Raises StaleSchemaError if the DB exists but is stale (or pre-v2:
+    lacks _meta entirely). The caller (typically bootstrap.ensure_db)
+    is expected to respond by rebuilding.
+
+    Cheap: opens the DB, runs one SELECT, closes. Safe to call before
+    any other DB work.
+    """
+    if not db_path.exists():
+        # Not stale, just absent. Caller decides whether to build.
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT value FROM _meta WHERE key = 'schema_version'"
+            )
+            row = cur.fetchone()
+        except sqlite3.OperationalError:
+            # _meta table doesn't exist — this is a pre-v2 DB.
+            raise StaleSchemaError(found=None, expected=CURRENT_SCHEMA_VERSION)
+        found = row[0] if row else None
+        if found != CURRENT_SCHEMA_VERSION:
+            raise StaleSchemaError(found=found, expected=CURRENT_SCHEMA_VERSION)
+    finally:
+        conn.close()
+
+
 class SqliteAliasSource(AliasSource):
     """Alias source backed by a local SQLite DB (the one build_alias_db.py produces)."""
 
     def __init__(self, db_path: Path):
         if not db_path.exists():
             sys.exit(f"error: alias database not found at {db_path}")
+        # Verify schema upfront so a stale cache surfaces as StaleSchemaError
+        # rather than a confusing query error later.
+        verify_schema_version(db_path)
         self.db_path = db_path
 
     def _connect(self):

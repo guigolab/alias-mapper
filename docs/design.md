@@ -1,7 +1,7 @@
 # alias-mapper — Design
 
 A command-line tool that rewrites the chromosome / scaffold names in
-bioinformatics input files (GFF, FASTA, etc.) from one naming convention
+bioinformatics input files (GFF, GTF, FASTA) from one naming convention
 to another. The translation uses a precomputed alias table built from
 NCBI assembly reports.
 
@@ -13,19 +13,27 @@ without translation.
 
 ## Scope
 
-**v1:**
+**Shipped today:**
 
-- File formats: GFF, GTF, FASTA
-- Single input file per invocation
+- File formats: GFF, GTF, FASTA (single input file per invocation)
 - Naming conventions: GenBank, RefSeq, UCSC, Sequence-Name,
   Assigned-Molecule
-- Source convention and assembly auto-detected by default; overridable
-  via flags
+- Source convention and assembly auto-detected from the input;
+  overridable via flags
+- Pipeline streams NCBI's four `assembly_summary` files weekly,
+  publishes `aliases.tsv.gz` + `historical.tsv.gz` + `failures.tsv`
+  as GitHub Release assets
+- Client builds the local SQLite cache from the TSV on first run
+- Schema-versioned cache: stale-schema caches rebuild silently when
+  the CLI is upgraded
 
-**Out of v1:**
+**On the horizon:**
 
-- Multi-file mode (`--out-dir`)
-- Parallel processing
+- Multi-file `align` subcommand: make several files share one
+  consistent naming convention, optionally driven by a reference FASTA
+- Issue #5 (suppressed-accession error messages) wired into the CLI
+  using the already-shipped `historical.tsv.gz`
+- Hosted query API as the eventual replacement for the local DB
 
 ## Command-line interface
 
@@ -49,38 +57,38 @@ alias-mapper convert annotations.gff --assembly GCF_000001405.40 \
 
 ### Flags
 
-| Flag            | Required | Purpose                                                     |
-| --------------- | -------- | ----------------------------------------------------------- |
-| `--to`          | yes      | Target naming convention                                    |
-| `-o / --output` | no       | Output path. Defaults to `<input>.converted.<ext>`          |
-| `--from`        | no       | Source convention. Auto-detected if absent                  |
-| `--assembly`    | no       | Restrict lookup to one assembly. Auto-detected if absent    |
-| `--alias-table` | no       | Path to alias table file (default: standard cache location) |
+| Flag            | Required | Purpose                                                  |
+| --------------- | -------- | -------------------------------------------------------- |
+| `--to`          | yes      | Target naming convention                                 |
+| `-o / --output` | yes      | Output path                                              |
+| `--from`        | no       | Source convention. Auto-detected if absent               |
+| `--assembly`    | no       | Restrict lookup to one assembly. Auto-detected if absent |
+| `--alias-db`    | no       | Path to the alias SQLite database                        |
 
 ## Design decisions
 
 ### Source convention: auto-detect, overridable
 
 Inputs may come from collaborators or public databases where the user
-doesn't know the source convention with certainty. Some files mix
-conventions internally.
+doesn't know the source convention with certainty. Auto-detection
+samples up to 50 unique sequence names from the input and scores them
+against each convention column in the alias DB; the highest-scoring
+match wins.
 
-Auto-detection samples the first ~50 unique sequence names in the input,
-checks which convention best matches the alias table, and uses the
-highest-scoring match. The `--from` flag overrides auto-detection when
-the user knows the source.
+If no clear winner emerges (fewer than 5 absolute matches, or winner
+fails to beat the runner-up by ≥2×), detection refuses to commit and
+the user must supply `--from` explicitly.
 
-Stretch: per-line resolution for files that mix conventions across rows.
+Stretch (deferred to v2): per-line resolution for files that mix
+conventions across rows.
 
 ### Assembly scope: auto-detect, overridable
 
-A sequence name like `1` is ambiguous across species. The tool must
-scope its lookup to a single assembly.
-
-Auto-detection scores candidate assemblies by how many of the input's
-first ~50 unique sequence names exist in each one. The highest match
-wins. If the top two scores are close, auto-detection fails and
-`--assembly` must be supplied explicitly.
+A sequence name like `1` is ambiguous across species. The tool scopes
+its lookup to a single assembly, chosen by the same scoring trick used
+for convention detection: for each assembly, count how many sample
+names match any of its naming columns, take the assembly with the most
+matches. Same confidence rule applies.
 
 ### Unmapped sequence names: warn and pass through
 
@@ -92,144 +100,322 @@ erroring is too aggressive for common cases (a handful of unknown
 contigs shouldn't kill the run). Pass-through preserves data while
 making issues visible.
 
-If future use cases need it, `--strict` (error on any unmapped name)
-and `--skip-unknown` (drop unmapped rows) could be added without
+`--strict` (error on any unmapped name) and `--skip-unknown` (drop
+unmapped rows) are not implemented in v1 but could be added without
 changing the default behaviour.
 
 ### Single-file mode in v1, multi-file in v2
 
-A real-world invocation often has one FASTA and several GFF files for
-the same assembly. The efficient pattern is to load the alias table
-once and reuse it across all input files via a shared in-memory lookup.
-
-v1 keeps the interface simple — one input per invocation. Users with
-multiple files run the tool multiple times, accepting the table-load
-cost each time. v2 adds `--out-dir` and processes multiple files in
-one invocation.
+v1 takes one input file per invocation. A common real-world workflow
+has one FASTA and several GFF files for the same assembly; running the
+tool repeatedly accepts the table-load cost each time. v2 adds the
+`align` subcommand, which takes multiple files and a target convention
+(specified directly or inferred from a reference FASTA), loads the
+alias table once, and translates all files in one pass.
 
 ## Architecture
 
+The CLI has three responsibilities split across three areas of code,
+so each can change independently:
+
 ```
-[ alias table (SQLite or TSV) ]
-         │ (loaded once at startup)
-         ▼
-[ in-memory dict: source_name → target_name ]
-         │
-         ▼
-[ optional: auto-detect source convention and assembly ]
-         │
-         ▼
-[ stream input file line-by-line ]
-         │
-         ▼ (for each line)
-[ extract sequence name → dict lookup → substitute → write to output ]
-         │
-         ▼
-[ on EOF: print summary (rows processed, rows unmapped) ]
+                 user types command
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │   alias_mapper.py    │   parses args, orchestrates,
+              │                      │   prints user-facing messages
+              └──────┬──────────┬────┘
+                     │          │
+            ┌────────▼──┐    ┌──▼──────────────┐
+            │ formats/  │    │ alias_source.py │
+            │           │    │                 │
+            │ - GffT.   │    │ - get_map
+            │ - FastaT. │    │ - detect_convention
+            │ - dispatch│    │ - detect_assembly
+            └─────┬─────┘    └─────────┬───────┘
+                  │                    │
+                  │ (per-line          │ (SQL queries)
+                  │  translation)      │
+                  ▼                    ▼
+              input file           SQLite DB
 ```
+
+**`alias_mapper.py`** is the entry point. It parses arguments, decides
+whether to sample the input for auto-detection, calls the right pieces
+in the right order, and translates internal errors into user-facing
+messages.
+
+**`alias_source.py`** wraps the data. The `AliasSource` abstract base
+class defines the interface (`get_map`, `detect_convention`,
+`detect_assembly`, `assembly_exists`); `SqliteAliasSource` is the v1
+implementation. When the hosted API ships, `HttpAliasSource` will
+implement the same interface and the CLI will pick one based on
+configuration. No code outside this module knows SQLite is involved.
+
+**`formats/`** holds one translator class per file format. Each
+implements `FileTranslator`'s two methods: `translate_line` (swap the
+name in one line) and `sample_names` (read up to N unique names from
+the start of a file). A dict in `formats/__init__.py` maps file
+extensions to translator classes; adding a new format is one new class
+plus one line in the dict.
 
 ### Performance properties
 
 - **Constant memory:** input files are streamed line-by-line; memory
-  usage is independent of file size. Handles arbitrarily large files.
+  usage is independent of file size.
 - **Linear time:** single pass over the input; one dict lookup per row.
-- **One alias-table load per invocation:** loaded into memory once and
-  reused for every row.
+- **One alias-table load per invocation:** the per-assembly subset of
+  the DB (~50 rows) is loaded into memory once and reused for every
+  input line.
 
 ## Edge cases
 
+Status column: ✓ implemented in v1, ◯ planned for v1.x or v2.
+
 ### Input files
 
-| Case                                                                            | Behaviour                                                                    |
-| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| File doesn't exist                                                              | Error with clear message                                                     |
-| File is empty                                                                   | Warn; write empty output; exit 0                                             |
-| File is gzipped (`.gff.gz`)                                                     | Auto-detected by extension; read transparently                               |
-| Mixed line endings (`\r\n` vs `\n`)                                             | Normalised on read                                                           |
-| Malformed line (wrong column count)                                             | Warn; pass through unchanged                                                 |
-| Sequence name with whitespace / special chars                                   | Look up as-is; if unmapped, warn-and-pass-through                            |
-| Multi-GB input                                                                  | Streaming handles it                                                         |
-| FASTA header with description (`>chr1 Homo sapiens...`)                         | Split on first whitespace; translate the first token only; preserve the rest |
-| GFF/GTF metadata lines containing sequence names (`##sequence-region chr1 ...`) | Translate names in those header lines too                                    |
+| Case                                                            | Behaviour                                                                    | Status |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------- | :----: |
+| File doesn't exist                                              | Error with clear message                                                     |   ✓    |
+| Sequence name with whitespace / special chars                   | Look up as-is; if unmapped, warn-and-pass-through                            |   ✓    |
+| Multi-GB input                                                  | Streaming handles it                                                         |   ✓    |
+| FASTA header with description (`>chr1 Homo sapiens...`)         | Translate the first token only; preserve description (including whitespace) |   ✓    |
+| Unknown file extension                                          | Error listing supported extensions                                           |   ✓    |
+| File is empty                                                   | Warn; write empty output; exit 0                                             |   ◯    |
+| File is gzipped (`.gff.gz`)                                     | Auto-detect by extension; read transparently                                 |   ◯    |
+| Mixed line endings (`\r\n` vs `\n`)                             | Normalise on read                                                            |   ◯    |
+| Malformed line (wrong column count)                             | Warn; pass through unchanged                                                 |   ◯    |
+| GFF metadata lines with sequence names (`##sequence-region`)    | Translate names in those header lines too                                    |   ◯    |
 
 ### Naming conventions
 
-| Case                                                   | Behaviour                                                                          |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| Name not in alias table                                | Warn-and-pass-through                                                              |
-| Name ambiguous across assemblies                       | Auto-detection fails; require `--assembly`                                         |
-| Accession with version mismatch (`CM000663.1` vs `.2`) | Strict version matching by default. `--ignore-version` strips the suffix and warns |
-| Mitochondrial DNA aliases (`MT`, `chrM`, `chrMT`)      | Handled normally — these are entries in the alias table                            |
-| Mixed conventions within one file                      | Stretch: per-line resolution                                                       |
+| Case                                                   | Behaviour                                                                       | Status |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------- | :----: |
+| Name not in alias table                                | Warn-and-pass-through                                                           |   ✓    |
+| Auto-detection has no clear winner                     | Error; require explicit `--from` or `--assembly`                                |   ✓    |
+| Mitochondrial DNA aliases (`MT`, `chrM`, `chrMT`)      | Handled normally — these are entries in the alias table                         |   ✓    |
+| Accession with version mismatch (`CM000663.1` vs `.2`) | Strict version matching by default. `--ignore-version` strips the suffix        |   ◯    |
+| Mixed conventions within one file                      | Per-line resolution (stretch)                                                   |   ◯    |
 
 ### Output
 
-| Case                           | Behaviour                                                   |
-| ------------------------------ | ----------------------------------------------------------- |
-| Output file already exists     | Error unless `--force` is supplied                          |
-| Output directory doesn't exist | Create it                                                   |
-| Tool fails mid-write           | Write to a temp file; rename on success — no partial output |
+| Case                           | Behaviour                                                   | Status |
+| ------------------------------ | ----------------------------------------------------------- | :----: |
+| Output directory doesn't exist | Create it                                                   |   ✓    |
+| Output file already exists     | Error unless `--force` is supplied                          |   ◯    |
+| Tool fails mid-write           | Write to a temp file; rename on success — no partial output |   ◯    |
 
 ## Data storage
 
-### Current state
+The alias dataset is rebuilt weekly from NCBI's four
+`assembly_summary` files and published to GitHub Releases under
+`data-YYYY-MM-DD` tags. Each data release ships three artifacts:
 
-The weekly workflow rebuilds the alias dataset from NCBI and publishes
-the result as a gzipped TSV (~33 MB, ~3M rows, ~66k assemblies)
-attached to a GitHub Release.
+- `aliases.tsv.gz`     — merged-row per-assembly data (~35 MB)
+- `historical.tsv.gz`  — dead-accession lookup (~5 MB)
+- `failures.tsv`       — per-assembly collection failure log
 
-This works at current scale but has known limitations:
+The CLI maintains a local SQLite cache in the platform cache
+directory:
 
-- The full dataset is rebuilt every week even though >99% of assemblies
-  are unchanged.
-- Publishing a new Release every week accumulates near-identical
-  snapshots indefinitely.
-- TSV is not queryable; lookups require scanning the whole file.
+- macOS:   `~/Library/Caches/alias-mapper/aliases.db`
+- Linux:   `~/.cache/alias-mapper/aliases.db`
+- Windows: `%LOCALAPPDATA%\alias-mapper\Cache\aliases.db`
 
-### Proposed: SQLite with incremental updates
+First-run flow: the CLI queries the GitHub API for the most recent
+`data-*` release, downloads its `aliases.tsv.gz` asset, runs
+`build_alias_db` to produce the local SQLite, and caches it.
+Subsequent invocations use the cached DB directly. If the schema
+version in the cache no longer matches the CLI's expected version
+(typical scenario: CLI was upgraded), the cache is rebuilt silently.
+Users can force a refresh via `alias-mapper update`; there is no
+automatic refresh on every run.
 
-Replace the TSV with a single SQLite database. One table:
+The `platformdirs` package handles cross-platform cache-path
+resolution. Together with `certifi` (and optionally `truststore`
+for TLS-inspecting networks), it's the only runtime dependency
+outside the standard library.
 
-```sql
-CREATE TABLE aliases (
-    accession         TEXT NOT NULL,
-    assembly_name     TEXT,
-    genbank_acc       TEXT,
-    refseq_acc        TEXT,
-    sequence_name     TEXT,
-    assigned_molecule TEXT,
-    ucsc_name         TEXT,
-    length            INTEGER,
-    last_updated      TEXT
-);
+### TSV schema (schema v2)
+
+One row per assembly. Per-molecule data is held in comma-separated,
+position-aligned list columns: the Nth comma-separated entry in every
+list column refers to the same molecule, with entries sorted by
+length descending.
+
+```
+genbank_acc, refseq_acc, assembly_name, taxid, organism_name,
+group, assembly_level,
+sequence_names, genbank_seq_accs, refseq_seq_accs, ucsc_names,
+assigned_molecules, lengths
 ```
 
-Indexes on each name column for fast point lookups.
+This format is human-readable and diff-friendly. RefSeq-only or
+GenBank-only assemblies just leave the absent column empty; empty
+entries within a list (e.g. a UCSC name for a non-vertebrate
+chromosome) are preserved between commas so position-alignment is
+never broken.
 
-The weekly workflow queries the DB for the most recent `last_updated`
-value, fetches only newer assemblies from NCBI, and appends them via
-`INSERT`. The DB becomes the canonical source of truth; snapshots are
-published less frequently (e.g. monthly).
+### SQLite schema
+
+The build step (`build_alias_db.build_db`) explodes the TSV's list
+columns back into per-molecule rows. The TSV is the human-readable
+source of truth; the SQLite is whatever shape is fastest for queries.
+
+```sql
+CREATE TABLE _meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+-- schema_version, build_date
+
+CREATE TABLE assemblies (
+    accession           TEXT PRIMARY KEY,    -- GenBank acc (GCA_*)
+    assembly_name       TEXT,
+    paired_refseq_acc   TEXT,                -- GCF_*, if paired
+    taxid               INTEGER,
+    organism_name       TEXT,
+    group_name          TEXT,                -- "group" is reserved in SQL
+    assembly_level      TEXT,
+    last_updated        TEXT
+);
+
+CREATE TABLE aliases (
+    accession         TEXT NOT NULL,         -- FK to assemblies.accession
+    position          INTEGER NOT NULL,      -- 0-based, longest first
+    sequence_name     TEXT,
+    assigned_molecule TEXT,
+    genbank_acc       TEXT,                  -- per-sequence (e.g. CM000663.2)
+    refseq_acc        TEXT,                  -- per-sequence (e.g. NC_000001.11)
+    ucsc_name         TEXT,
+    length            INTEGER
+);
+
+CREATE INDEX idx_accession ON aliases(accession);
+```
+
+Single index on `aliases(accession)`. The CLI's only filter when
+loading a per-assembly map is by accession; indexing every name column
+would inflate the DB by hundreds of MB for queries the CLI never runs.
+
+Detection queries (`detect_convention`, `detect_assembly`) do full
+table scans, but a single scan in SQLite is sub-second and runs at
+most once per invocation.
 
 ### Why SQLite over Parquet
 
-Parquet does not support row-level appends. Adding new rows requires
-reading the full file into memory and writing a new one, which defeats
-the goal of incremental updates.
+Parquet does not support row-level appends; adding rows requires
+rewriting the file. SQLite supports `INSERT` natively, has indexed
+point lookups that match the CLI's access pattern, and ships in
+Python's standard library. The size overhead vs. gzipped TSV is
+acceptable.
 
-SQLite supports `INSERT` natively, has indexed point lookups that match
-the CLI's access pattern, and ships in Python's standard library. Size
-overhead vs. gzipped TSV (~2-3× uncompressed) is acceptable.
+## Pipeline
+
+The weekly GitHub Actions workflow runs `scripts/collect_aliases.py`,
+which is driven by NCBI's four `assembly_summary` files rather than
+per-assembly enumeration via the `datasets` CLI.
+
+Pipeline phases:
+
+1. **Stream** the four summary files (current + historical, GenBank +
+   RefSeq). In CI they're streamed directly with no disk persistence;
+   local dev keeps a 24h cache for iteration speed.
+2. **Plan**: filter to `version_status=latest`, allowed assembly
+   levels (Complete Genome / Chromosome / Scaffold), and eukaryotic
+   taxonomic groups. Join GenBank↔RefSeq pairs via `gbrs_paired_asm`,
+   stem-normalized to handle version differences. Current plan size
+   is ~48k assemblies.
+3. **Historical writer**: write `historical.tsv.gz` from the
+   historical summary files. Pure planner output — doesn't depend on
+   per-assembly fetches, so it survives partial sweeps.
+4. **Per-assembly fetch**: for each planned assembly, fetch its
+   `assembly_report.txt` via the `ftp_path` column from the summary
+   file (no URL reconstruction needed). Parallelized via
+   `ThreadPoolExecutor`; structured failures logged to `failures.tsv`.
+5. **Adaptive coverage cap**: take the top 50 longest molecules per
+   assembly; expand toward 90% of `genome_size` if needed; hard
+   ceiling at 500 to guard against pathologically fragmented
+   scaffold assemblies.
+6. **Write merged TSV rows** to `aliases.tsv.gz`.
+
+The cost split is the key architectural property: the cheap
+catalog-level work (steps 1-3) finishes in minutes; the expensive
+per-molecule data (steps 4-6) takes most of the wall clock. This
+maps directly onto a future hosted-API design where the two could
+refresh at different cadences.
+
+## What's next
+
+### Multi-file `align` subcommand
+
+`convert` (the current single-file flow) stays as-is. `align` is the
+planned addition for the multi-file workflow:
+
+```
+alias-mapper align --fasta ref.fa annotations.gff peaks.gff
+alias-mapper align --to ucsc annotations.gff peaks.gff
+```
+
+The first form uses a reference FASTA's convention as the target; the
+second specifies the target directly. Both share the existing
+translator code under the hood. Reframing: the goal is making a set
+of files *consistent*, not specifically performing a translation.
+
+### Suppressed-accession messages (issue #5)
+
+`historical.tsv.gz` already ships. The remaining work is on the CLI
+side: download it on first run alongside the alias data, materialize
+it as an `assemblies_historical` SQLite table, and use it to give
+useful errors when a user references a dead accession ("this was
+suppressed on YYYY-MM-DD, replaced by X").
+
+### Hosted API as the eventual replacement
+
+The local DB is a stepping stone. The eventual target is a hosted
+endpoint that answers the same queries the CLI runs today. The
+`AliasSource` abstraction was introduced specifically so this can
+land as a new implementation (`HttpAliasSource`) without touching
+the translator or CLI code.
+
+A useful framing emerged from the pipeline rewrite: NCBI's data has
+two natural cost tiers — cheap catalog metadata (the four summary
+files, refreshable in minutes) and expensive per-molecule alias data
+(per-assembly fetches, hours of wall clock). The hosted API would
+expose both: catalog and alias queries hit different backing stores
+that refresh at different cadences. The pipeline rewrite is half of
+that future API already.
 
 ## Open questions
 
-1. Default location for the alias table: fetched from the latest
-   Release at runtime, or a local file pointed at by `--alias-table`?
-2. Should an `alias-mapper inspect <file>` subcommand report the
+1. Should an `alias-mapper inspect <file>` subcommand report the
    auto-detected source convention and assembly without rewriting the
-   file?
-3. Should mapping be lossless-reversible (A→B→A returns the original)?
+   file? Useful for debugging input data.
+2. Should mapping be lossless-reversible (A→B→A returns the original)?
    This constrains how unmapped rows are handled.
-4. Storage location for the SQLite DB: committed to the repo, attached
-   to Releases, or both?
-5. Snapshot cadence: weekly, monthly, or quarterly?
+3. Cache invalidation policy for the user-side DB: manual (`alias-mapper
+   update`), automatic on a TTL, or check Release etag on every run?
+
+## Notes from investigation
+
+### Single-row assemblies are legitimate
+
+184 assemblies in an earlier production DB had only one row (one
+molecule). Reviewed them against NCBI; not a parser bug. They fall
+into a few categories, each recognizable from the `assembly_name`
+or sequence name:
+
+- Single-chromosome or chromosome-arm deposits (a researcher
+  sequenced one chromosome separately from the rest of the genome)
+- Y-chromosome-only assemblies (Y is often deposited apart from the
+  autosomes)
+- Bacterial and endosymbiont genomes (one circular chromosome by
+  biology). Note that the new pipeline filters bacteria out by
+  default, so these no longer appear in the dataset.
+- Mitochondrial genomes (~16-20 kb, often suffixed
+  `_mitochondrial_genome_(circular)` in the sequence name)
+- Viral / phage genomes
+
+In the merged-row schema these are single-entry lists — still valid,
+just position 0 only.

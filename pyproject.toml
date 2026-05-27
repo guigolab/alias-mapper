@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alias-mapper"
-version = "1.0.0"
+version = "2.0.0"
 description = "Translate chromosome/scaffold names in bioinformatics files between naming conventions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,16 @@ classifiers = [
 ]
 dependencies = [
     "platformdirs>=4.0",
+    "certifi",
+]
+
+[project.optional-dependencies]
+# truststore makes the package use the system keychain for TLS
+# verification, which is necessary on networks that do TLS inspection
+# (e.g. corporate / institutional networks like CRG's). Harmless
+# elsewhere. Install with: pip install alias-mapper[trusted]
+trusted = [
+    "truststore",
 ]
 
 [project.urls]

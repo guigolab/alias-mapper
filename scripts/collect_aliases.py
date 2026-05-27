@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-collect_aliases_summary.py
---------------------------
-Next-generation alias collection driven by NCBI's four assembly_summary
-files instead of per-assembly `datasets` enumeration.
+collect_aliases.py
+------------------
+Weekly alias data collection, driven by NCBI's four assembly_summary
+files. Produces three Release artifacts:
+
+  - aliases.tsv.gz     merged-row per-assembly data (schema v2). One
+                       row per assembly; per-molecule data lives in
+                       comma-separated, position-aligned list columns.
+  - historical.tsv.gz  dead-accession lookup with suppression dates
+                       and best-effort replacements.
+  - failures.tsv       per-assembly collection failure log.
 
 Pipeline shape:
   1. Stream the four summary files (current GenBank, current RefSeq,
@@ -11,18 +18,17 @@ Pipeline shape:
   2. Join GenBank↔RefSeq pairs via gbrs_paired_asm (stem-normalized).
   3. Filter to version_status=latest, allowed assembly_level set, and
      allowed eukaryotic taxonomic groups.
-  4. Build a historicals lookup (defensive skip today; "replaced by X"
-     user-facing messages later — issue #5).
+  4. Write historical.tsv.gz (pure planner output — doesn't depend on
+     per-assembly fetches, so it survives a partial sweep).
   5. For each planned assembly, fetch its assembly_report.txt via the
-     `ftp_path` column directly (no URL reconstruction).
+     `ftp_path` column directly (parallelized via ThreadPoolExecutor).
   6. Adaptive coverage cap: top 50 longest molecules, expand toward
      90% of genome_size if needed, hard ceiling at 500.
-  7. Emit rows in the v1 per-molecule TSV schema (stub writer; will be
-     swapped for the merged-row schema once Emilio's #7 questions are
-     answered).
+  7. Emit merged TSV rows.
 
-When the v1 collect_aliases.py is retired, this file is renamed to
-scripts/collect_aliases.py in one commit.
+Local dev keeps a cache of the four summary files at
+~/.cache/alias-mapper-dev/ for fast iteration. CI passes --no-cache to
+stream from NCBI on every run.
 """
 
 import argparse
@@ -66,13 +72,12 @@ ALLOWED_GROUPS = frozenset({
     "vertebrate_mammalian", "vertebrate_other",
 })
 
-# Output schemas (kept identical to v1 collect_aliases.py for compat).
 # Output schemas.
 #
-# TSV is the new merged-row format: one row per assembly. Per-molecule
-# data lives in comma-separated, position-aligned list columns. The
-# Nth comma-separated entry in every list column refers to the same
-# molecule. Sort order across lists is length descending.
+# TSV is the merged-row format (schema v2): one row per assembly.
+# Per-molecule data lives in comma-separated, position-aligned list
+# columns. The Nth comma-separated entry in every list column refers
+# to the same molecule. Sort order across lists is length descending.
 #
 # The SQLite build (build_alias_db.py) explodes these lists back into
 # per-molecule rows for indexed lookup. The TSV stays human-readable
@@ -412,27 +417,6 @@ def fetch_and_parse_one(
     return entry, top, None
 
 
-def fetch_assembly_report(
-    entry: AssemblyPlanEntry,
-) -> tuple[str | None, tuple[str, str] | None]:
-    """
-    Legacy single-purpose fetcher. Kept for any code that wants just the
-    raw report text without parsing. New callers should use
-    fetch_and_parse_one().
-    """
-    if not entry.ftp_path or entry.ftp_path == "na":
-        return None, ("no_ftp_path", "plan entry has empty/na ftp_path")
-    url = report_url_for(entry)
-    try:
-        return http_get_with_retry(url), None
-    except PermanentHTTPError as e:
-        if e.code in (404, 410):
-            return None, ("not_found", f"{url}: {e}")
-        return None, ("http_error_permanent", f"{url}: {e}")
-    except TransientHTTPError as e:
-        return None, ("transient_exhausted", str(e))
-
-
 def parse_assembly_report(text: str) -> list[dict[str, str]]:
     """
     Parse an assembly_report.txt into row dicts keyed by the column
@@ -562,29 +546,6 @@ def write_historical_tsv(
         f"-> {output_path}",
         file=sys.stderr,
     )
-
-
-def row_to_tsv(
-    row: dict[str, str], entry: AssemblyPlanEntry,
-) -> dict[str, str]:
-    """
-    DEPRECATED: v1 per-molecule row formatter. Kept for reference; no
-    longer used by run_collection. Will be removed at cut-over.
-    """
-    def clean(v: str | None) -> str:
-        if v is None or v.strip().lower() == "na":
-            return ""
-        return v.strip()
-    return {
-        "ACCESSION":         entry.genbank_acc,
-        "ASSEMBLY_NAME":     entry.assembly_name,
-        "GENBANK_ACC":       clean(row.get("GenBank-Accn", "")),
-        "REFSEQ_ACC":        clean(row.get("RefSeq-Accn", "")),
-        "SEQUENCE_NAME":     clean(row.get("Sequence-Name", "")),
-        "ASSIGNED_MOLECULE": clean(row.get("Assigned-Molecule", "")),
-        "UCSC_NAME":         clean(row.get("UCSC-style-name", "")),
-        "LENGTH":            clean(row.get("Sequence-Length", "")),
-    }
 
 
 def merge_assembly_to_row(

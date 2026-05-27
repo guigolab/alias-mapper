@@ -3,12 +3,6 @@ scripts/_http.py
 ----------------
 Shared HTTP machinery for the alias-mapper data pipeline scripts.
 
-Extracted from the original collect_aliases.py so the summary-file
-pipeline (collect_aliases_summary.py) can share the same retry
-semantics. The original collect_aliases.py is unchanged and still
-has its own private copies of these helpers — that script gets
-deleted at cut-over time.
-
 What's here:
   - SSL context setup (truststore -> certifi -> stdlib fallback)
   - HTTP error classes: PermanentHTTPError, TransientHTTPError
@@ -17,7 +11,11 @@ What's here:
 Note on SSL: this module is imported at top of the calling script.
 If the caller wants to override SSL behavior at runtime (e.g. an
 --insecure flag), it can mutate `SSL_CONTEXT` after import. See
-collect_aliases_summary.py's main() for the pattern.
+collect_aliases.py's main() for the pattern.
+
+Duplicates the SSL setup in src/alias_mapper/_ssl.py because scripts/
+can't easily import from the installed package without a sys.path hack.
+Keep both in sync if you change one.
 """
 
 import random
@@ -52,7 +50,7 @@ except ImportError:
 
 
 HTTP_HEADERS = {
-    "User-Agent": "alias-mapper/0.2 (https://github.com/Max25R/alias-mapper)",
+    "User-Agent": "alias-mapper/2.0 (https://github.com/Max25R/alias-mapper)",
 }
 
 # HTTP error classification.

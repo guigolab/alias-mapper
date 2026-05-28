@@ -324,10 +324,11 @@ Pipeline phases:
    RefSeq). In CI they're streamed directly with no disk persistence;
    local dev keeps a 24h cache for iteration speed.
 2. **Plan**: filter to `version_status=latest`, allowed assembly
-   levels (Complete Genome / Chromosome / Scaffold), and eukaryotic
-   taxonomic groups. Join GenBank↔RefSeq pairs via `gbrs_paired_asm`,
-   stem-normalized to handle version differences. Current plan size
-   is ~48k assemblies.
+   levels (Complete Genome / Chromosome — Scaffold excluded for v2.0,
+   see below) and eukaryotic taxonomic groups. Join GenBank↔RefSeq
+   pairs via `gbrs_paired_asm`, stem-normalized to handle version
+   differences. Current plan size is ~16k assemblies (down from ~48k
+   when Scaffold was included).
 3. **Historical writer**: write `historical.tsv.gz` from the
    historical summary files. Pure planner output — doesn't depend on
    per-assembly fetches, so it survives partial sweeps.
@@ -399,6 +400,34 @@ that future API already.
    update`), automatic on a TTL, or check Release etag on every run?
 
 ## Notes from investigation
+
+### Scaffold-level excluded from v2.0
+
+The pipeline's first two full-scale CI runs failed: the first timed
+out at the workflow's 360-minute ceiling, the second hit it again
+after processing ~28k of 47,920 planned assemblies. The fetch rate
+started at ~15/s and decayed monotonically to ~1.3/s by the 28k
+mark, with zero rejections throughout — NCBI's FTP HTTPS endpoint
+is silently throttling sustained sweeps. (An NCBI API key won't
+help: API keys raise the limit on E-utilities, not the FTP host
+this pipeline uses.) 6h is also the GitHub-hosted runner ceiling,
+so the timeout itself can't be raised further.
+
+Dropping Scaffold-level cuts the plan from ~48k to ~16k (Scaffold
+was 31,594 of 47,920) and removes the assemblies with the highest
+per-assembly molecule counts — a double win on cost. Chromosome+
+is also the population most users actually want: Scaffold-level
+entries are draft genomes rarely used for downstream tools that
+need alias mapping. Coverage trade-off is acceptable for v2.0.
+
+Paths to add Scaffold back, in rough order of effort:
+1. Matrix-split the workflow (N parallel jobs, merge artifacts).
+   Risk: GitHub Actions runners may share IP ranges that NCBI
+   throttles together, in which case parallelism buys nothing.
+   Worth a small-scale test first.
+2. Switch the per-assembly fetch path off the FTP HTTPS endpoint —
+   `rsync` bulk pull, a mirror, or `datasets` CLI batched access.
+3. Self-hosted runner with no 6h ceiling.
 
 ### Single-row assemblies are legitimate
 

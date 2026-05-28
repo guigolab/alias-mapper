@@ -66,7 +66,16 @@ SUMMARY_FILES = {
     "refseq_historical":  f"{SUMMARY_BASE}/refseq/assembly_summary_refseq_historical.txt",
 }
 
-ALLOWED_LEVELS = frozenset({"Complete Genome", "Chromosome", "Scaffold"})
+# v2.0 ships Chromosome+ only. Scaffold-level (draft genomes, ~32k of
+# 48k eukaryotic assemblies) made CI unfinishable inside the 6h
+# GitHub-hosted ceiling: per-assembly fetch rate decays from ~15/s to
+# ~1/s over a sustained sweep (NCBI FTP throttling on the long tail),
+# and Scaffold assemblies are both more numerous and have more
+# molecules per assembly than Chromosome+. Two failed runs (timeout at
+# 360min, second at ~28k/48k) confirmed the full set doesn't fit.
+# Add Scaffold back once we have either a matrix-split workflow or a
+# more rate-limit-friendly fetch path (rsync bulk pull, mirror, etc).
+ALLOWED_LEVELS = frozenset({"Complete Genome", "Chromosome"})
 
 ALLOWED_GROUPS = frozenset({
     "fungi", "invertebrate", "plant", "protozoa",

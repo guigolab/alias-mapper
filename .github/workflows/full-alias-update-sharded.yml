@@ -154,7 +154,7 @@ jobs:
           cp catalog/historical.tsv.gz historical.tsv.gz
 
           ROWS=$(gzip -dc aliases.tsv.gz | tail -n +2 | wc -l)
-          HEADERS=$(gzip -dc aliases.tsv.gz | head -1 | tr '\t' '\n' | wc -l)
+          HEADERS=$(gzip -dc aliases.tsv.gz | awk -F'\t' 'NR==1{print NF}')
           FAILS=$(tail -n +2 failures.tsv | wc -l)
           echo "Merged: $ROWS assembly rows, $HEADERS columns, $FAILS failures"
 

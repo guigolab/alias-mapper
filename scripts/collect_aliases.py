@@ -844,6 +844,20 @@ def main() -> int:
         print(f"    {n:>8,}  {group}", file=sys.stderr)
     print(f"  paired with RefSeq: {paired:,} / {len(plan):,}", file=sys.stderr)
 
+    # Keep a reference to the unsharded plan. The historical replacement
+    # index must be built from the full population, not a single shard,
+    # or REPLACED_BY lookups would be incomplete on sharded runs.
+    full_plan = plan
+
+    if args.num_shards > 1:
+        before = len(plan)
+        plan = plan[args.shard::args.num_shards]
+        print(
+            f"  --shard {args.shard}/{args.num_shards}: "
+            f"{before:,} -> {len(plan):,} assemblies (strided)",
+            file=sys.stderr,
+        )
+
     if args.limit is not None:
         plan = plan[:args.limit]
         print(f"  --limit applied: trimmed to {len(plan):,} assemblies",
@@ -866,8 +880,15 @@ def main() -> int:
     # Write historical TSV first — it's pure planner output, doesn't
     # depend on any per-assembly fetching. If the alias sweep fails or
     # gets interrupted, the historical artifact is still valid.
-    replacement_index = build_replacement_index(plan)
-    write_historical_tsv(historicals, replacement_index, historical_path)
+    #
+    # Built from full_plan (not the possibly-sharded plan) so REPLACED_BY
+    # is complete regardless of sharding. Skippable so sharded fetch jobs
+    # don't each redundantly rewrite the same shard-independent file.
+    if args.skip_historical:
+        print("Skipping historical TSV (--skip-historical).", file=sys.stderr)
+    else:
+        replacement_index = build_replacement_index(full_plan)
+        write_historical_tsv(historicals, replacement_index, historical_path)
 
     print(f"Starting per-assembly collection ({len(plan):,} assemblies, {args.workers} workers)...",
           file=sys.stderr)

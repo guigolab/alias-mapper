@@ -1,0 +1,95 @@
+name: Shard throughput test
+
+# Manual-only, throwaway diagnostic. Answers exactly one question:
+#
+#   When several collection jobs run in parallel on GitHub-hosted
+#   runners, does each shard hold its own fetch rate, or do they get
+#   throttled collectively because they share an NCBI-facing IP pool?
+#
+# This CANNOT be answered locally (one machine = one IP, always shared),
+# so it has to run here. How to read the result, from each shard's
+# `rate=...` log lines (printed in the "Rate summary" step and saved as
+# an artifact):
+#
+#   - Each shard independently sustains a high rate (so the aggregate is
+#     ~3x a single run's throughput at the same point) => runners have
+#     distinct IPs, the matrix split works. Build the real N-way
+#     workflow.
+#   - The shards collectively sag toward a single run's throughput
+#     (each crawling, summing to roughly what one run does alone) =>
+#     they share a throttled IP pool, the split buys nothing. Pivot to
+#     a different fetch path (rsync bulk pull, mirror, datasets CLI).
+#
+# Baseline to compare against (single-run profile from the failed full
+# sweep): ~16/s at the start, ~8/s by 2k, ~4/s by 6k, ~3/s by 10k.
+#
+# NOTE: the matrix list below and --num-shards MUST agree. To try a
+# different shard count, change both `shard: [0, 1, 2]` and
+# `--num-shards 3` to the same N.
+
+on:
+  workflow_dispatch:
+    inputs:
+      per_shard_limit:
+        description: "Assemblies fetched per shard (2000 is enough to see throttling onset)"
+        default: "2000"
+
+permissions:
+  contents: read
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    # Generous ceiling; the point is each shard only fetches a few
+    # thousand. If a shard approaches this, that's itself a result
+    # (throttled hard).
+    timeout-minutes: 60
+    strategy:
+      # Don't cancel the other shards if one fails — we want every
+      # shard's rate profile even if one errors out.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Python dependencies
+        run: pip install certifi truststore
+
+      # Each shard builds the full plan (cheap — streams the four
+      # summary files in under a minute), strides out its slice, and
+      # fetches only that slice. --skip-historical so three jobs don't
+      # each rewrite the same shard-independent historical file.
+      # 2>&1 | tee captures the rate log for the summary + artifact.
+      - name: Run shard ${{ matrix.shard }}
+        run: |
+          python scripts/collect_aliases.py \
+            --no-cache \
+            --num-shards 3 \
+            --shard ${{ matrix.shard }} \
+            --limit ${{ github.event.inputs.per_shard_limit }} \
+            --skip-historical \
+            --output shard-${{ matrix.shard }}.tsv.gz \
+            --failures shard-${{ matrix.shard }}-failures.tsv \
+            2>&1 | tee shard-${{ matrix.shard }}.log
+
+      # Print the rate progression right in the Actions log so you can
+      # eyeball it without downloading the artifact.
+      - name: Rate summary for shard ${{ matrix.shard }}
+        if: always()
+        run: |
+          echo "=== rate checkpoints, shard ${{ matrix.shard }} ==="
+          grep 'rate=' shard-${{ matrix.shard }}.log || echo "(no rate lines logged)"
+
+      - name: Upload shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}-log
+          path: shard-${{ matrix.shard }}.log

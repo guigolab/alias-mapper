@@ -98,6 +98,12 @@ EXPECTED_TSV_COLS = [
 # instead of a wall of column names.
 V1_TSV_COLS_MARKER = {"ACCESSION", "GENBANK_ACC", "REFSEQ_ACC", "LENGTH"}
 
+# Within-cell list delimiter for the merged-row TSV. Must match
+# collect_aliases.LIST_DELIM. Pipe (not comma) because NCBI Sequence-Name
+# / Assigned-Molecule values can contain commas, which would break
+# position alignment.
+LIST_DELIM = "|"
+
 # Which TSV list columns hold per-molecule data, and what SQLite column
 # each maps to. The first element of each tuple is the TSV column, the
 # second is the SQLite alias column.
@@ -174,16 +180,17 @@ def _explode_row(row: dict[str, str]) -> tuple[dict, list[tuple]]:
         "genome_coverage_ungapped_pct": _float_or_none(row.get("genome_coverage_ungapped_pct", "")),
     }
 
-    # Split each list column on commas. An empty cell yields [""], which
-    # split() would treat as one empty molecule — guard against that by
-    # treating the whole list as empty if every entry is empty.
+    # Split each list column on the list delimiter. An empty cell yields
+    # [""], which split() would treat as one empty molecule — guard
+    # against that by treating the whole list as empty if every entry is
+    # empty.
     split_lists = {}
     for tsv_col, _sql_col in LIST_COLUMN_MAP:
         raw = row.get(tsv_col, "") or ""
         if raw == "":
             split_lists[tsv_col] = []
         else:
-            split_lists[tsv_col] = raw.split(",")
+            split_lists[tsv_col] = raw.split(LIST_DELIM)
 
     # Validate position alignment. All non-empty lists must have the
     # same length. (Empty lists are tolerated for fields that genuinely

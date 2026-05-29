@@ -240,9 +240,9 @@ outside the standard library.
 
 ### TSV schema (schema v3)
 
-One row per assembly. Per-molecule data is held in comma-separated,
-position-aligned list columns: the Nth comma-separated entry in every
-list column refers to the same molecule, with entries sorted by
+One row per assembly. Per-molecule data is held in pipe-separated
+(`|`), position-aligned list columns: the Nth pipe-separated entry in
+every list column refers to the same molecule, with entries sorted by
 length descending.
 
 ```
@@ -265,8 +265,12 @@ summary row carries no genome size to divide by.
 This format is human-readable and diff-friendly. RefSeq-only or
 GenBank-only assemblies just leave the absent column empty; empty
 entries within a list (e.g. a UCSC name for a non-vertebrate
-chromosome) are preserved between commas so position-alignment is
-never broken.
+chromosome) are preserved between delimiters so position-alignment is
+never broken. The delimiter is a pipe rather than a comma because NCBI
+Sequence-Name and Assigned-Molecule values can themselves contain
+commas; a pipe is effectively absent from these fields, and any
+assembly that does contain one is skipped at collection time (logged
+to failures.tsv) rather than emitted as a misaligned row.
 
 ### SQLite schema
 

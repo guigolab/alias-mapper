@@ -110,6 +110,14 @@ HISTORICAL_COLUMNS = [
     "accession", "status", "replaced_by", "suppression_date", "assembly_name",
 ]
 
+# Within-cell list delimiter for the merged-row TSV. Comma collides with
+# commas that appear inside NCBI Sequence-Name / Assigned-Molecule values
+# (e.g. GCA_014751505.1), which silently broke position alignment. Pipe is
+# effectively absent from these fields; any assembly that does contain a
+# pipe is skipped at write time (logged to failures) rather than emitted
+# as a corrupt row. Must match build_alias_db.LIST_DELIM.
+LIST_DELIM = "|"
+
 # Coverage cap policy.
 COVERAGE_BASE = 50           # always take at least this many longest molecules
 COVERAGE_CEILING = 500       # never take more than this (pathological scaffold guard)
@@ -569,19 +577,38 @@ def write_historical_tsv(
     )
 
 
+# Fields whose values are joined into the position-aligned list columns.
+# If any value contains LIST_DELIM the encoding would break, so the
+# assembly is skipped (logged) instead of emitting a corrupt row.
+_LIST_SOURCE_FIELDS = (
+    "Sequence-Name", "GenBank-Accn", "RefSeq-Accn",
+    "UCSC-style-name", "Assigned-Molecule", "Sequence-Length",
+)
+
+
+def delimiter_collision(molecules: list[dict[str, str]]) -> str | None:
+    """Return the first value containing LIST_DELIM, or None if all clean."""
+    for m in molecules:
+        for field in _LIST_SOURCE_FIELDS:
+            v = m.get(field)
+            if v and LIST_DELIM in v:
+                return v
+    return None
+
+
 def merge_assembly_to_row(
     molecules: list[dict[str, str]], entry: AssemblyPlanEntry,
 ) -> dict[str, str]:
     """
     Collapse the per-molecule rows from one assembly into a single
-    merged TSV row with position-aligned comma-separated lists.
+    merged TSV row with position-aligned, pipe-separated lists.
 
     `molecules` is assumed to already be sorted (longest first, since
     adaptive_top_molecules returns them that way). Position 0 of every
     list column refers to the longest molecule.
 
     Empty/na values within a list are preserved as empty between
-    commas (e.g. "chr1,,chr3") so position-alignment is never broken.
+    delimiters (e.g. "chr1||chr3") so position-alignment is never broken.
     """
     def clean(v: str | None) -> str:
         if v is None or v.strip().lower() == "na":
@@ -589,7 +616,7 @@ def merge_assembly_to_row(
         return v.strip()
 
     def col(name: str) -> str:
-        return ",".join(clean(m.get(name, "")) for m in molecules)
+        return LIST_DELIM.join(clean(m.get(name, "")) for m in molecules)
 
     def _length_of(m: dict[str, str]) -> int:
         try:
@@ -690,10 +717,29 @@ def run_collection(
                     fail_counts[reason] = fail_counts.get(reason, 0) + 1
                     n_fail += 1
                 else:
-                    writer.writerow(merge_assembly_to_row(top, entry))
-                    n_rows += 1
-                    n_molecules += len(top)
-                    n_ok += 1
+                    collision = delimiter_collision(top)
+                    if collision is not None:
+                        print(
+                            f"  [{i}/{total}] SKIP {entry.genbank_acc} "
+                            f"(delimiter in value)",
+                            file=sys.stderr,
+                        )
+                        fail_writer.writerow({
+                            "accession": entry.genbank_acc,
+                            "assembly_name": entry.assembly_name,
+                            "stage": "merge",
+                            "reason": "delimiter_in_value",
+                            "detail": f"value contains {LIST_DELIM!r}: {collision!r}",
+                        })
+                        fail_counts["delimiter_in_value"] = (
+                            fail_counts.get("delimiter_in_value", 0) + 1
+                        )
+                        n_fail += 1
+                    else:
+                        writer.writerow(merge_assembly_to_row(top, entry))
+                        n_rows += 1
+                        n_molecules += len(top)
+                        n_ok += 1
 
                 if i % log_every == 0:
                     elapsed = time.monotonic() - started

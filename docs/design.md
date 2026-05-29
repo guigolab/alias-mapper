@@ -238,7 +238,7 @@ resolution. Together with `certifi` (and optionally `truststore`
 for TLS-inspecting networks), it's the only runtime dependency
 outside the standard library.
 
-### TSV schema (schema v2)
+### TSV schema (schema v3)
 
 One row per assembly. Per-molecule data is held in comma-separated,
 position-aligned list columns: the Nth comma-separated entry in every
@@ -249,8 +249,18 @@ length descending.
 genbank_acc, refseq_acc, assembly_name, taxid, organism_name,
 group, assembly_level,
 sequence_names, genbank_seq_accs, refseq_seq_accs, ucsc_names,
-assigned_molecules, lengths
+assigned_molecules, lengths,
+genome_coverage_pct, genome_coverage_ungapped_pct
 ```
+
+The two `genome_coverage_*` columns are per-assembly scalars (not
+position-aligned lists): the summed length of the molecules kept for
+that assembly as a percentage of the assembly's total size, from the
+summary row's `genome_size` and `genome_size_ungapped` respectively.
+They answer "what fraction of the genome do the chromosomes we carry
+account for?" — near 100% for chromosome-level assemblies, lower
+where the adaptive cap trimmed a scaffold tail. Empty when the
+summary row carries no genome size to divide by.
 
 This format is human-readable and diff-friendly. RefSeq-only or
 GenBank-only assemblies just leave the absent column empty; empty
@@ -272,14 +282,16 @@ CREATE TABLE _meta (
 -- schema_version, build_date
 
 CREATE TABLE assemblies (
-    accession           TEXT PRIMARY KEY,    -- GenBank acc (GCA_*)
-    assembly_name       TEXT,
-    paired_refseq_acc   TEXT,                -- GCF_*, if paired
-    taxid               INTEGER,
-    organism_name       TEXT,
-    group_name          TEXT,                -- "group" is reserved in SQL
-    assembly_level      TEXT,
-    last_updated        TEXT
+    accession                    TEXT PRIMARY KEY,    -- GenBank acc (GCA_*)
+    assembly_name                TEXT,
+    paired_refseq_acc            TEXT,                -- GCF_*, if paired
+    taxid                        INTEGER,
+    organism_name                TEXT,
+    group_name                   TEXT,                -- "group" is reserved in SQL
+    assembly_level               TEXT,
+    genome_coverage_pct          REAL,                -- kept length / genome_size, %
+    genome_coverage_ungapped_pct REAL,                -- kept length / genome_size_ungapped, %
+    last_updated                 TEXT
 );
 
 CREATE TABLE aliases (

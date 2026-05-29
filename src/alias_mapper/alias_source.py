@@ -24,7 +24,7 @@ import sys
 # Stored as int rather than str so future versions can compare
 # numerically ("is this cache older than v3?") without lexical pitfalls
 # ("10" < "2" as strings).
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 # Convention column names in the aliases table. Kept here (not in the

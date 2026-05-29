@@ -42,7 +42,7 @@ from pathlib import Path
 #
 # Stored as int in `_meta` so future versions can compare numerically
 # ("is this cache older than v3?") without string-vs-numeric pitfalls.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CREATE_META_SQL = """
 CREATE TABLE _meta (
@@ -53,14 +53,16 @@ CREATE TABLE _meta (
 
 CREATE_ASSEMBLIES_SQL = """
 CREATE TABLE assemblies (
-    accession           TEXT PRIMARY KEY,    -- assembly-level GenBank acc (GCA_*)
-    assembly_name       TEXT,
-    paired_refseq_acc   TEXT,                -- assembly-level RefSeq acc (GCF_*), if paired
-    taxid               INTEGER,
-    organism_name       TEXT,
-    group_name          TEXT,                -- "group" is a reserved word in SQL
-    assembly_level      TEXT,
-    last_updated        TEXT
+    accession                    TEXT PRIMARY KEY,    -- assembly-level GenBank acc (GCA_*)
+    assembly_name                TEXT,
+    paired_refseq_acc            TEXT,                -- assembly-level RefSeq acc (GCF_*), if paired
+    taxid                        INTEGER,
+    organism_name                TEXT,
+    group_name                   TEXT,                -- "group" is a reserved word in SQL
+    assembly_level               TEXT,
+    genome_coverage_pct          REAL,                -- kept-molecule length / genome_size, percent
+    genome_coverage_ungapped_pct REAL,                -- kept-molecule length / genome_size_ungapped, percent
+    last_updated                 TEXT
 )
 """
 
@@ -88,6 +90,7 @@ EXPECTED_TSV_COLS = [
     "organism_name", "group", "assembly_level",
     "sequence_names", "genbank_seq_accs", "refseq_seq_accs",
     "ucsc_names", "assigned_molecules", "lengths",
+    "genome_coverage_pct", "genome_coverage_ungapped_pct",
 ]
 
 # Schema-v1 columns. Used only for detection — if the TSV looks like
@@ -132,6 +135,17 @@ def _int_or_none(v):
     return None
 
 
+def _float_or_none(v):
+    """Best-effort float parse; empty/non-numeric -> None."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
 def _explode_row(row: dict[str, str]) -> tuple[dict, list[tuple]]:
     """
     Take one merged TSV row and return:
@@ -156,6 +170,8 @@ def _explode_row(row: dict[str, str]) -> tuple[dict, list[tuple]]:
         "organism_name":     _text_or_none(row["organism_name"]),
         "group_name":        _text_or_none(row["group"]),
         "assembly_level":    _text_or_none(row["assembly_level"]),
+        "genome_coverage_pct":          _float_or_none(row.get("genome_coverage_pct", "")),
+        "genome_coverage_ungapped_pct": _float_or_none(row.get("genome_coverage_ungapped_pct", "")),
     }
 
     # Split each list column on commas. An empty cell yields [""], which
@@ -253,8 +269,9 @@ def build_db(tsv_path: Path, db_path: Path, batch_size: int = 10_000) -> None:
     insert_assembly_sql = """
         INSERT OR IGNORE INTO assemblies (
             accession, assembly_name, paired_refseq_acc, taxid,
-            organism_name, group_name, assembly_level, last_updated
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            organism_name, group_name, assembly_level,
+            genome_coverage_pct, genome_coverage_ungapped_pct, last_updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     insert_alias_sql = """
         INSERT INTO aliases (
@@ -301,6 +318,8 @@ def build_db(tsv_path: Path, db_path: Path, batch_size: int = 10_000) -> None:
                 assembly_record["organism_name"],
                 assembly_record["group_name"],
                 assembly_record["assembly_level"],
+                assembly_record["genome_coverage_pct"],
+                assembly_record["genome_coverage_ungapped_pct"],
                 today_iso,
             ))
             n_assemblies += 1

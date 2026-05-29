@@ -97,6 +97,11 @@ TSV_COLUMNS = [
     "organism_name", "group", "assembly_level",
     "sequence_names", "genbank_seq_accs", "refseq_seq_accs",
     "ucsc_names", "assigned_molecules", "lengths",
+    # Per-assembly genome coverage: summed length of the kept molecules
+    # as a percentage of the assembly's total size, against both the
+    # gapped and ungapped genome_size from the summary row. Empty when
+    # the summary row has no genome_size to divide by.
+    "genome_coverage_pct", "genome_coverage_ungapped_pct",
 ]
 FAILURE_COLUMNS = [
     "accession", "assembly_name", "stage", "reason", "detail",
@@ -586,20 +591,41 @@ def merge_assembly_to_row(
     def col(name: str) -> str:
         return ",".join(clean(m.get(name, "")) for m in molecules)
 
+    def _length_of(m: dict[str, str]) -> int:
+        try:
+            return int(m.get("Sequence-Length", "0"))
+        except (TypeError, ValueError):
+            return 0
+
+    # Coverage is the summed length of the molecules we kept (after the
+    # adaptive cap) over the assembly's total size from the summary row.
+    # This answers "what fraction of the genome do the chromosomes we
+    # carry account for?" — high for chromosome-level assemblies, lower
+    # where the cap trimmed a long scaffold tail. Empty when genome_size
+    # is unknown (can't divide by nothing).
+    summed_length = sum(_length_of(m) for m in molecules)
+
+    def _coverage_pct(denom: int | None) -> str:
+        if not denom or denom <= 0:
+            return ""
+        return f"{100 * summed_length / denom:.2f}"
+
     return {
-        "genbank_acc":        entry.genbank_acc,
-        "refseq_acc":         entry.refseq_acc or "",
-        "assembly_name":      entry.assembly_name,
-        "taxid":              entry.taxid,
-        "organism_name":      entry.organism_name,
-        "group":              entry.group,
-        "assembly_level":     entry.assembly_level,
-        "sequence_names":     col("Sequence-Name"),
-        "genbank_seq_accs":   col("GenBank-Accn"),
-        "refseq_seq_accs":    col("RefSeq-Accn"),
-        "ucsc_names":         col("UCSC-style-name"),
-        "assigned_molecules": col("Assigned-Molecule"),
-        "lengths":            col("Sequence-Length"),
+        "genbank_acc":                  entry.genbank_acc,
+        "refseq_acc":                   entry.refseq_acc or "",
+        "assembly_name":                entry.assembly_name,
+        "taxid":                        entry.taxid,
+        "organism_name":                entry.organism_name,
+        "group":                        entry.group,
+        "assembly_level":               entry.assembly_level,
+        "sequence_names":               col("Sequence-Name"),
+        "genbank_seq_accs":             col("GenBank-Accn"),
+        "refseq_seq_accs":              col("RefSeq-Accn"),
+        "ucsc_names":                   col("UCSC-style-name"),
+        "assigned_molecules":           col("Assigned-Molecule"),
+        "lengths":                      col("Sequence-Length"),
+        "genome_coverage_pct":          _coverage_pct(entry.genome_size),
+        "genome_coverage_ungapped_pct": _coverage_pct(entry.genome_size_ungapped),
     }
 
 
@@ -743,7 +769,33 @@ def main() -> int:
         "--no-cache", action="store_true",
         help="Always download summary files fresh. Use in CI.",
     )
+    parser.add_argument(
+        "--num-shards", type=int, default=1,
+        help="Split the plan into this many disjoint shards. Each shard is "
+             "meant to run as a separate process/job; concatenate the "
+             "per-shard TSVs afterward. Default 1 (no sharding).",
+    )
+    parser.add_argument(
+        "--shard", type=int, default=0,
+        help="Which shard to process, 0-indexed (0 .. num-shards-1). Shards "
+             "are strided (plan[shard::num_shards]), so each gets a "
+             "representative mix of assemblies and they finish at a similar "
+             "time. Ignored when --num-shards is 1.",
+    )
+    parser.add_argument(
+        "--skip-historical", action="store_true",
+        help="Don't write historical.tsv.gz. Use on sharded fetch jobs "
+             "(historical is shard-independent; let one job own it).",
+    )
     args = parser.parse_args()
+
+    if args.num_shards < 1:
+        sys.exit("error: --num-shards must be >= 1")
+    if not (0 <= args.shard < args.num_shards):
+        sys.exit(
+            f"error: --shard must be in [0, {args.num_shards}) "
+            f"(got {args.shard})"
+        )
 
     # --insecure overrides the SSL context globally by mutating the
     # package's _ssl module. _http.http_get_with_retry and our own

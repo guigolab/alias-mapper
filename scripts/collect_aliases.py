@@ -787,6 +787,19 @@ def main() -> int:
         help="Don't write historical.tsv.gz. Use on sharded fetch jobs "
              "(historical is shard-independent; let one job own it).",
     )
+    parser.add_argument(
+        "--levels", default=None,
+        help="Comma-separated assembly levels to include, overriding the "
+             "default (Complete Genome, Chromosome). Pass "
+             "'Complete Genome,Chromosome,Scaffold' for the full set. Used "
+             "by the sharded full-scale workflow.",
+    )
+    parser.add_argument(
+        "--historical-only", action="store_true",
+        help="Build the plan, write historical.tsv.gz from the full "
+             "population, and exit before any per-assembly fetch. Used by "
+             "the sharded workflow's catalog job. Doesn't need --output.",
+    )
     args = parser.parse_args()
 
     if args.num_shards < 1:
@@ -823,8 +836,15 @@ def main() -> int:
     print(f"  {len(historicals):,} dead accessions total", file=sys.stderr)
 
     print("Building assembly plan...", file=sys.stderr)
+    allowed_levels = ALLOWED_LEVELS
+    if args.levels:
+        allowed_levels = frozenset(
+            s.strip() for s in args.levels.split(",") if s.strip()
+        )
+        print(f"  levels override: {sorted(allowed_levels)}", file=sys.stderr)
     plan = list(build_assembly_plan(
         historicals, cache_dir, args.cache_ttl_hours, use_cache,
+        allowed_levels=allowed_levels,
     ))
     print(f"  {len(plan):,} assemblies in plan", file=sys.stderr)
 
@@ -867,8 +887,20 @@ def main() -> int:
         print("Dry run — exiting before per-assembly fetches.", file=sys.stderr)
         return 0
 
+    # Historical-only: write just the (shard-independent) historical
+    # artifact from the full plan and exit. Used by the sharded
+    # workflow's catalog job, which owns historical so the fetch shards
+    # don't each rewrite it. Doesn't need --output.
+    if args.historical_only:
+        historical_path = Path(args.historical_output or "historical.tsv.gz")
+        historical_path.parent.mkdir(parents=True, exist_ok=True)
+        replacement_index = build_replacement_index(full_plan)
+        write_historical_tsv(historicals, replacement_index, historical_path)
+        print("Historical-only mode: wrote historical, exiting.", file=sys.stderr)
+        return 0
+
     if not args.output:
-        sys.exit("error: --output required unless --dry-run is set")
+        sys.exit("error: --output required unless --dry-run or --historical-only")
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

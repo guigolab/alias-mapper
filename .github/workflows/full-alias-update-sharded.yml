@@ -1,0 +1,197 @@
+name: Full alias data update (sharded)
+
+# Full-scale data build across ALL assembly levels (Complete Genome +
+# Chromosome + Scaffold, ~48k assemblies), using a sharded matrix to
+# get around NCBI's per-IP throttling. A single sweep can't finish the
+# full set inside GitHub's 6h ceiling (the fetch rate decays from
+# ~16/s to ~1/s); splitting the fetch across N parallel runners with
+# distinct IPs sidesteps that — validated by the shard-throughput-test
+# workflow, where parallel shards each held full rate.
+#
+# Shape (map-reduce):
+#   setup    -> turns num_shards into a matrix index list
+#   catalog  -> writes historical.tsv.gz once from the full population
+#   shard    -> matrix: each job fetches a strided 1/N slice of the plan
+#   merge    -> concatenates shard TSVs, verifies the merge builds into
+#               SQLite, then publishes the Release
+#
+# Manual-only for now. Once this is trusted it can take over the weekly
+# schedule from alias-tsv-update.yml (which stays Chromosome+ only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      num_shards:
+        description: "Number of parallel fetch shards (8 ~= 6k assemblies each)"
+        default: "8"
+
+permissions:
+  contents: write
+
+env:
+  LEVELS: "Complete Genome,Chromosome,Scaffold"
+
+jobs:
+  # ---- map setup: num_shards -> [0, 1, ..., N-1] for the matrix -------
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.gen.outputs.shards }}
+    steps:
+      - name: Compute shard index list
+        id: gen
+        run: |
+          N="${{ github.event.inputs.num_shards }}"
+          echo "shards=$(python3 -c "import json; print(json.dumps(list(range(int('$N')))))")" >> "$GITHUB_OUTPUT"
+
+  # ---- catalog: the shard-independent historical artifact -------------
+  catalog:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install certifi truststore
+      - name: Write historical.tsv.gz from full population
+        run: |
+          python scripts/collect_aliases.py \
+            --no-cache \
+            --levels "$LEVELS" \
+            --historical-only \
+            --historical-output historical.tsv.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catalog
+          path: historical.tsv.gz
+
+  # ---- map: one fetch job per shard -----------------------------------
+  shard:
+    needs: setup
+    runs-on: ubuntu-latest
+    # Each shard fetches ~48k/N assemblies. At N=8 that's ~6k, which the
+    # single-run profile clears in ~20-30 min even with back-half
+    # throttling. 120 is a generous ceiling; approaching it is itself a
+    # signal that something is throttling harder than expected.
+    timeout-minutes: 120
+    strategy:
+      # Keep every shard running even if one fails, so we get all the
+      # rate logs. A failed shard means merge won't run (it needs all
+      # shards green) — re-run rather than ship a partial dataset.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.setup.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install certifi truststore
+      - name: Fetch shard ${{ matrix.shard }} of ${{ github.event.inputs.num_shards }}
+        run: |
+          python scripts/collect_aliases.py \
+            --no-cache \
+            --levels "$LEVELS" \
+            --num-shards ${{ github.event.inputs.num_shards }} \
+            --shard ${{ matrix.shard }} \
+            --skip-historical \
+            --output aliases-shard-${{ matrix.shard }}.tsv.gz \
+            --failures failures-shard-${{ matrix.shard }}.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: |
+            aliases-shard-${{ matrix.shard }}.tsv.gz
+            failures-shard-${{ matrix.shard }}.tsv
+
+  # ---- reduce: combine shards, verify, release ------------------------
+  merge:
+    needs: [setup, catalog, shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Pulls every artifact: catalog/ (historical) and shard-N/ (alias
+      # + failures per shard) into the working dir.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Merge shard TSVs
+        run: |
+          set -euo pipefail
+
+          ALIAS_FILES=$(ls shard-*/aliases-shard-*.tsv.gz 2>/dev/null | sort -V)
+          if [ -z "$ALIAS_FILES" ]; then
+            echo "ERROR: no alias shard files found"; exit 1
+          fi
+          echo "Merging alias shards:"; echo "$ALIAS_FILES"
+          {
+            first=1
+            for f in $ALIAS_FILES; do
+              if [ "$first" = "1" ]; then gzip -dc "$f"; first=0;
+              else gzip -dc "$f" | tail -n +2; fi
+            done
+          } | gzip > aliases.tsv.gz
+
+          FAIL_FILES=$(ls shard-*/failures-shard-*.tsv 2>/dev/null | sort -V)
+          {
+            first=1
+            for f in $FAIL_FILES; do
+              if [ "$first" = "1" ]; then cat "$f"; first=0;
+              else tail -n +2 "$f"; fi
+            done
+          } > failures.tsv
+
+          if [ ! -f catalog/historical.tsv.gz ]; then
+            echo "ERROR: historical.tsv.gz missing from catalog job"; exit 1
+          fi
+          cp catalog/historical.tsv.gz historical.tsv.gz
+
+          ROWS=$(gzip -dc aliases.tsv.gz | tail -n +2 | wc -l)
+          HEADERS=$(gzip -dc aliases.tsv.gz | head -1 | tr '\t' '\n' | wc -l)
+          FAILS=$(tail -n +2 failures.tsv | wc -l)
+          echo "Merged: $ROWS assembly rows, $HEADERS columns, $FAILS failures"
+
+      # Gate: the merged TSV must build into SQLite before we publish.
+      # Catches a corrupt merge or a schema problem here, not on a
+      # user's first run. build_alias_db.py is stdlib-only, runs without
+      # installing the package.
+      - name: Verify merged TSV builds into SQLite
+        run: |
+          python src/alias_mapper/build_alias_db.py \
+            --tsv aliases.tsv.gz \
+            --db /tmp/verify.db
+
+      - name: Compute Release tag
+        id: tag
+        run: echo "tag=data-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish data files as GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Alias data - ${{ steps.tag.outputs.tag }}"
+          body: |
+            Full-scale snapshot of alias mappings for eukaryotic genome
+            assemblies (GenBank + RefSeq), all assembly levels (Complete
+            Genome, Chromosome, Scaffold), built from NCBI's four
+            assembly_summary files via the sharded matrix workflow.
+
+            Assets:
+              - `aliases.tsv.gz`     — merged-row per-assembly data
+                (schema v3), concatenated from all fetch shards.
+              - `historical.tsv.gz`  — dead-accession lookup.
+              - `failures.tsv`       — per-assembly failure log,
+                concatenated across shards.
+
+            Generated by the `Full alias data update (sharded)` workflow.
+          files: |
+            aliases.tsv.gz
+            historical.tsv.gz
+            failures.tsv

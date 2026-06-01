@@ -48,6 +48,14 @@ DATA_RELEASE_PREFIX = "data-"
 # Filename for the local cached database.
 LOCAL_DB_NAME = "aliases.db"
 
+# The downloaded TSV is kept alongside the DB after a successful build
+# (rather than deleted) so a schema-only rebuild — triggered when the
+# user upgrades the CLI and their cached DB no longer matches the
+# expected schema — can run from the local copy without a network round
+# trip. `alias-mapper update` still re-downloads, since its whole purpose
+# is to fetch fresher data.
+LOCAL_TSV_NAME = TSV_ASSET_NAME
+
 # User-Agent string for HTTP requests. GitHub appreciates a real
 # identifier; some endpoints reject requests without one.
 USER_AGENT = f"{GITHUB_REPO}/bootstrap (https://github.com/{GITHUB_OWNER}/{GITHUB_REPO})"
@@ -218,6 +226,10 @@ def ensure_db(db_path: Path | None = None, force: bool = False) -> Path:
     if db_path is None:
         db_path = default_cache_path()
 
+    # Tracks why we're (re)building, which decides whether a locally
+    # cached TSV may be reused instead of re-downloading.
+    stale_schema_rebuild = False
+
     if db_path.exists() and not force:
         # Check schema version; a stale cache forces a rebuild even
         # if the user didn't ask for one. This is the silent-upgrade
@@ -232,29 +244,62 @@ def ensure_db(db_path: Path | None = None, force: bool = False) -> Path:
                 file=sys.stderr,
             )
             force = True
+            stale_schema_rebuild = True
 
     if force and db_path.exists():
         print(f"Refreshing alias database at {db_path}", file=sys.stderr)
     else:
         print(f"No local alias database found. Setting up...", file=sys.stderr)
 
-    # Use the DB's parent directory as a scratch area for the TSV.
-    # The TSV gets cleaned up after a successful build.
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    tsv_path = db_path.parent / TSV_ASSET_NAME
+    tsv_path = db_path.parent / LOCAL_TSV_NAME
 
+    # A schema-only rebuild can reuse a cached TSV if one is present:
+    # the data is current, only the DB shape is stale, so there's no
+    # need to touch the network. An explicit `update` (force=True but
+    # not stale_schema_rebuild) always re-downloads — fetching fresher
+    # data is the point.
+    if stale_schema_rebuild and tsv_path.exists():
+        print(
+            f"  Reusing cached TSV at {tsv_path} (offline rebuild).",
+            file=sys.stderr,
+        )
+        try:
+            build_db(tsv_path, db_path)
+        except (FileNotFoundError, ValueError) as e:
+            # The cached TSV is unusable (corrupt or itself stale-format).
+            # Fall through to a fresh download rather than failing.
+            print(
+                f"  Cached TSV could not be used ({e}); downloading fresh...",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  Cached at {db_path}", file=sys.stderr)
+            return db_path
+
+    # Either a first run, an explicit update, or a stale-schema rebuild
+    # with no usable cached TSV: download and build.
+    downloaded_this_call = False
     try:
         url = find_latest_data_release_url()
         download_with_progress(url, tsv_path)
+        downloaded_this_call = True
         print(f"  Building local database from TSV...", file=sys.stderr)
         try:
             build_db(tsv_path, db_path)
         except (FileNotFoundError, ValueError) as e:
             raise BootstrapError(f"build failed: {e}")
-    finally:
-        # Clean up the TSV regardless of whether the build succeeded.
-        # On failure the user gets to retry without a stale TSV sitting around.
-        tsv_path.unlink(missing_ok=True)
+    except BootstrapError:
+        # If the download itself failed, don't leave a partial/freshly
+        # downloaded TSV behind. (download_with_progress already cleans
+        # up its own .part file; this guards a TSV that downloaded but
+        # then failed to build.)
+        if downloaded_this_call:
+            tsv_path.unlink(missing_ok=True)
+        raise
 
+    # Keep the TSV on success — it's the offline-rebuild fallback for the
+    # next schema bump. It's the same artifact a future `update` would
+    # overwrite anyway, so the only cost is ~9 MB of cache.
     print(f"  Cached at {db_path}", file=sys.stderr)
     return db_path

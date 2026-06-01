@@ -1,13 +1,15 @@
-name: Weekly alias data update
+name: Chromosome+ data update (manual fallback)
 
 # -- WHEN this workflow runs ------------------------------------------------
+# Schedule REMOVED: the sharded full-set workflow
+# (full-alias-update-sharded.yml) now owns the weekly Sunday slot and
+# produces the full ~48k dataset. This lightweight Chromosome+ (~16k)
+# job is kept only as a manually-runnable fallback — e.g. if the
+# sharded run is failing and a quick partial dataset is needed. It is
+# no longer scheduled, so it can't collide with the sharded run's
+# `data-*` release tag.
 on:
-  # Cron schedule: "0 3 * * 0" = 03:00 UTC every Sunday.
-  # GitHub uses UTC. Pick a quiet hour to be nice to NCBI's servers.
-  schedule:
-    - cron: "0 3 * * 0"
-  # Lets you trigger the workflow manually from the "Actions" tab in GitHub.
-  # Useful for testing without waiting for Sunday.
+  # Manual trigger only — no cron.
   workflow_dispatch:
 
 # -- PERMISSIONS this workflow needs ----------------------------------------

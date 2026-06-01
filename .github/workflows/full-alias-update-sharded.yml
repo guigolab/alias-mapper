@@ -15,10 +15,18 @@ name: Full alias data update (sharded)
 #   merge    -> concatenates shard TSVs, verifies the merge builds into
 #               SQLite, then publishes the Release
 #
-# Manual-only for now. Once this is trusted it can take over the weekly
-# schedule from alias-tsv-update.yml (which stays Chromosome+ only).
+# Manual or weekly. This is the canonical data workflow: it produces
+# the full eukaryotic set (~48k assemblies, all levels) and publishes
+# the weekly `data-*` release the CLI pulls from. The older
+# single-job Chromosome+ workflow (alias-tsv-update.yml) has had its
+# schedule removed and is kept only as a manually-runnable fallback.
 
 on:
+  schedule:
+    # "0 3 * * 0" = 03:00 UTC every Sunday. Quiet hour, nice to NCBI.
+    # Scheduled runs use the num_shards default (8) since there's no
+    # one to supply the input.
+    - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
       num_shards:

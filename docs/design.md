@@ -20,10 +20,13 @@ without translation.
   Assigned-Molecule
 - Source convention and assembly auto-detected from the input;
   overridable via flags
-- Pipeline streams NCBI's four `assembly_summary` files weekly,
-  publishes `aliases.tsv.gz` + `historical.tsv.gz` + `failures.tsv`
-  as GitHub Release assets
-- Client builds the local SQLite cache from the TSV on first run
+- Pipeline streams NCBI's four `assembly_summary` files, publishes
+  `aliases.tsv.gz` + `historical.tsv.gz` + `failures.tsv` as GitHub
+  Release assets. The weekly run produces the full eukaryotic set
+  (~48k assemblies, all levels) via a sharded matrix workflow; a
+  single-job Chromosome+ workflow (~16k) is kept as a manual fallback
+- Client builds the local SQLite cache from the TSV on first run,
+  keeping the TSV for offline schema rebuilds
 - Schema-versioned cache: stale-schema caches rebuild silently when
   the CLI is upgraded
 
@@ -209,12 +212,13 @@ Status column: ✓ currently implemented, ◯ planned but not yet built.
 
 ## Data storage
 
-The alias dataset is rebuilt weekly from NCBI's four
-`assembly_summary` files and published to GitHub Releases under
-`data-YYYY-MM-DD` tags. Each data release ships three artifacts:
+The alias dataset is rebuilt from NCBI's four `assembly_summary`
+files and published to GitHub Releases under `data-YYYY-MM-DD` tags.
+Each data release ships three artifacts (sizes from the full ~48k
+set):
 
-- `aliases.tsv.gz`     — merged-row per-assembly data (~35 MB)
-- `historical.tsv.gz`  — dead-accession lookup (~5 MB)
+- `aliases.tsv.gz`     — merged-row per-assembly data (<!-- TODO: fill from the sharded full-set release page -->)
+- `historical.tsv.gz`  — dead-accession lookup (~1.4 MB)
 - `failures.tsv`       — per-assembly collection failure log
 
 The CLI maintains a local SQLite cache in the platform cache
@@ -226,11 +230,14 @@ directory:
 
 First-run flow: the CLI queries the GitHub API for the most recent
 `data-*` release, downloads its `aliases.tsv.gz` asset, runs
-`build_alias_db` to produce the local SQLite, and caches it.
-Subsequent invocations use the cached DB directly. If the schema
-version in the cache no longer matches the CLI's expected version
-(typical scenario: CLI was upgraded), the cache is rebuilt silently.
-Users can force a refresh via `alias-mapper update`; there is no
+`build_alias_db` to produce the local SQLite, and caches it. The
+downloaded TSV is kept alongside the DB. Subsequent invocations use
+the cached DB directly. If the schema version in the cache no longer
+matches the CLI's expected version (typical scenario: CLI was
+upgraded), the cache is rebuilt silently — reusing the cached TSV
+without a network round trip, so a schema-bump rebuild works offline.
+Users can force a fresh-data refresh via `alias-mapper update`, which
+always re-downloads (fetching newer data is its point); there is no
 automatic refresh on every run.
 
 The `platformdirs` package handles cross-platform cache-path
@@ -330,9 +337,9 @@ acceptable.
 
 ## Pipeline
 
-The weekly GitHub Actions workflow runs `scripts/collect_aliases.py`,
-which is driven by NCBI's four `assembly_summary` files rather than
-per-assembly enumeration via the `datasets` CLI.
+The data workflow runs `scripts/collect_aliases.py`, which is driven
+by NCBI's four `assembly_summary` files rather than per-assembly
+enumeration via the `datasets` CLI.
 
 Pipeline phases:
 
@@ -340,11 +347,12 @@ Pipeline phases:
    RefSeq). In CI they're streamed directly with no disk persistence;
    local dev keeps a 24h cache for iteration speed.
 2. **Plan**: filter to `version_status=latest`, allowed assembly
-   levels (Complete Genome / Chromosome — Scaffold excluded for v2.0,
-   see below) and eukaryotic taxonomic groups. Join GenBank↔RefSeq
-   pairs via `gbrs_paired_asm`, stem-normalized to handle version
-   differences. Current plan size is ~16k assemblies (down from ~48k
-   when Scaffold was included).
+   levels and eukaryotic taxonomic groups. Join GenBank↔RefSeq pairs
+   via `gbrs_paired_asm`, stem-normalized to handle version
+   differences. The full plan is ~48k assemblies (all of Complete
+   Genome / Chromosome / Scaffold). The allowed levels are selectable
+   via `--levels`: the canonical weekly workflow passes the full set;
+   the manual fallback workflow uses the default (Chromosome+, ~16k).
 3. **Historical writer**: write `historical.tsv.gz` from the
    historical summary files. Pure planner output — doesn't depend on
    per-assembly fetches, so it survives partial sweeps.
@@ -363,6 +371,40 @@ catalog-level work (steps 1-3) finishes in minutes; the expensive
 per-molecule data (steps 4-6) takes most of the wall clock. This
 maps directly onto a future hosted-API design where the two could
 refresh at different cadences.
+
+### Sharded full-set workflow
+
+The full ~48k set can't be fetched in a single sweep: NCBI throttles
+a sustained per-assembly fetch (the rate decays from ~16/s to ~1/s),
+and a single job can't finish inside GitHub's 6h runner ceiling.
+`full-alias-update-sharded.yml` gets around this with a map-reduce
+shape, and is the canonical workflow that owns the weekly Sunday
+schedule:
+
+- **setup** turns a `num_shards` input (default 8) into a matrix
+  index list.
+- **catalog** writes `historical.tsv.gz` once from the full
+  population (it's shard-independent).
+- **shard** (matrix, 8 jobs) each fetch a strided 1/N slice of the
+  plan, on separate GitHub runners with distinct outbound IPs —
+  which sidesteps the per-IP throttle. A standalone throughput test
+  confirmed parallel shards each hold full rate rather than
+  collectively sagging, so the runners do not share a throttled IP
+  pool.
+- **merge** concatenates the shard TSVs, prints the assembly-level
+  distribution and fails if no Scaffold rows are present (a guard
+  against a misconfigured run silently shipping Chromosome+ data
+  under the full-set tag), verifies the merged file builds into
+  SQLite, then publishes the Release.
+
+First full-set run completed in ~26 min at 8 shards (~6k assemblies
+per shard). <!-- TODO: confirm current wall time + failure count from the scheduled run's merge log -->
+
+The older `alias-tsv-update.yml` (single-job, Chromosome+ only) has
+had its schedule removed and is retained as a manually-runnable
+fallback — e.g. for a quick partial dataset if a sharded run is
+failing. Only the sharded workflow is scheduled, so the two can't
+collide on a `data-*` release tag.
 
 ## What's next
 
@@ -417,33 +459,54 @@ that future API already.
 
 ## Notes from investigation
 
-### Scaffold-level excluded from v2.0
+### Scaffold-level: excluded early, restored via sharding
 
-The pipeline's first two full-scale CI runs failed: the first timed
-out at the workflow's 360-minute ceiling, the second hit it again
-after processing ~28k of 47,920 planned assemblies. The fetch rate
-started at ~15/s and decayed monotonically to ~1.3/s by the 28k
-mark, with zero rejections throughout — NCBI's FTP HTTPS endpoint
-is silently throttling sustained sweeps. (An NCBI API key won't
-help: API keys raise the limit on E-utilities, not the FTP host
-this pipeline uses.) 6h is also the GitHub-hosted runner ceiling,
-so the timeout itself can't be raised further.
+The pipeline's first two full-scale single-job runs failed: the
+first timed out at the workflow's 360-minute ceiling, the second hit
+it again after processing ~28k of ~48k planned assemblies. The fetch
+rate started at ~15/s and decayed monotonically to ~1.3/s by the 28k
+mark, with zero rejections throughout — NCBI silently throttles
+sustained per-assembly sweeps. (An NCBI API key won't help: API keys
+raise the limit on E-utilities, not the FTP host this pipeline uses.)
+6h is also the GitHub-hosted runner ceiling, so the timeout itself
+can't be raised further.
 
-Dropping Scaffold-level cuts the plan from ~48k to ~16k (Scaffold
-was 31,594 of 47,920) and removes the assemblies with the highest
-per-assembly molecule counts — a double win on cost. Chromosome+
-is also the population most users actually want: Scaffold-level
-entries are draft genomes rarely used for downstream tools that
-need alias mapping. Coverage trade-off is acceptable for v2.0.
+The stopgap was dropping Scaffold-level, cutting the plan from ~48k
+to ~16k (Scaffold was 31,594 of 47,920) — which also removed the
+assemblies with the highest per-assembly molecule counts. That
+shipped a first working release while the throughput problem was
+solved separately.
 
-Paths to add Scaffold back, in rough order of effort:
-1. Matrix-split the workflow (N parallel jobs, merge artifacts).
-   Risk: GitHub Actions runners may share IP ranges that NCBI
-   throttles together, in which case parallelism buys nothing.
-   Worth a small-scale test first.
-2. Switch the per-assembly fetch path off the FTP HTTPS endpoint —
-   `rsync` bulk pull, a mirror, or `datasets` CLI batched access.
-3. Self-hosted runner with no 6h ceiling.
+The throughput problem was then solved by the sharded matrix
+workflow (see "Sharded full-set workflow" above), which restores the
+full set including Scaffold and is now the canonical weekly job. Of
+the three paths originally considered — matrix split, switching off
+the FTP HTTPS endpoint (rsync/mirror/`datasets`), and a self-hosted
+runner — the matrix split was tried first and worked: a throughput
+test confirmed parallel runners have distinct IPs that NCBI doesn't
+throttle collectively, and the full set completed in ~26 min.
+
+Two bugs surfaced while getting the full-scale run to land, both
+caught at the merge stage rather than reaching users:
+
+- A `gzip | head` pipeline under `set -o pipefail` exited 141
+  (SIGPIPE) on a large merged file, failing the merge step after the
+  data was already correctly merged. Fixed by using `awk NR==1`
+  (reads to EOF, no early pipe close) for the column-count check.
+- The within-cell list delimiter was a comma, but some NCBI
+  Sequence-Name / Assigned-Molecule values contain literal commas
+  (e.g. GCA_014751505.1), which broke position alignment — caught by
+  the merge step's build-verification gate. Fixed by switching the
+  delimiter to a pipe, with a write-time guard that skips and logs
+  any assembly whose values contain a pipe.
+
+A related lesson: the build-verification gate catches *corrupt* data
+(a file that won't parse or build), but valid-but-incomplete data
+(e.g. Chromosome+ rows where the full set was intended) builds fine
+and sails through. The merge step's Scaffold-presence check was
+added specifically to close that gap for the full-set workflow —
+"the run went green" and "the output is the right dataset" are
+different claims.
 
 ### Single-row assemblies are legitimate
 

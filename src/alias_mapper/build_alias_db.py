@@ -4,8 +4,8 @@ build_alias_db.py
 Builds a SQLite alias database from a TSV produced by the weekly
 collection workflow.
 
-The TSV is the merged-row format (schema v2): one row per assembly,
-with per-molecule data as comma-separated, position-aligned list
+The TSV is the merged-row format (schema v3): one row per assembly,
+with per-molecule data as pipe-separated (|), position-aligned list
 columns. This builder explodes those lists back into per-molecule
 rows for indexed lookup at query time. The TSV is the human-readable
 source of truth; the DB is whatever shape is fastest for queries.
@@ -84,7 +84,7 @@ CREATE TABLE aliases (
 # the DB by ~200 MB for queries the CLI never makes.
 INDEX_SQL = "CREATE INDEX idx_accession ON aliases(accession)"
 
-# Expected TSV column set (schema v2 merged-row format).
+# Expected TSV column set (schema v3 merged-row format).
 EXPECTED_TSV_COLS = [
     "genbank_acc", "refseq_acc", "assembly_name", "taxid",
     "organism_name", "group", "assembly_level",
@@ -228,7 +228,7 @@ def _explode_row(row: dict[str, str]) -> tuple[dict, list[tuple]]:
 
 def build_db(tsv_path: Path, db_path: Path, batch_size: int = 10_000) -> None:
     """
-    Build a SQLite alias DB from a merged-row TSV (schema v2).
+    Build a SQLite alias DB from a merged-row TSV (schema v3).
 
     Destructive: drops the existing DB at db_path before rebuilding.
     Prints progress to stderr.
@@ -304,7 +304,7 @@ def build_db(tsv_path: Path, db_path: Path, batch_size: int = 10_000) -> None:
             if V1_TSV_COLS_MARKER.issubset(found_set):
                 raise ValueError(
                     f"TSV at {tsv_path} uses schema v1 (per-molecule rows), "
-                    f"but this CLI expects schema v2 (merged-row). This "
+                    f"but this CLI expects the merged-row schema (v3). This "
                     f"usually means the data release predates the schema "
                     f"upgrade. Either wait for the next weekly data release, "
                     f"or downgrade the CLI to a v1-compatible version."

@@ -5,9 +5,9 @@ collect_aliases.py
 Weekly alias data collection, driven by NCBI's four assembly_summary
 files. Produces three Release artifacts:
 
-  - aliases.tsv.gz     merged-row per-assembly data (schema v2). One
+  - aliases.tsv.gz     merged-row per-assembly data (schema v3). One
                        row per assembly; per-molecule data lives in
-                       comma-separated, position-aligned list columns.
+                       pipe-separated (|), position-aligned list columns.
   - historical.tsv.gz  dead-accession lookup with suppression dates
                        and best-effort replacements.
   - failures.tsv       per-assembly collection failure log.
@@ -84,9 +84,9 @@ ALLOWED_GROUPS = frozenset({
 
 # Output schemas.
 #
-# TSV is the merged-row format (schema v2): one row per assembly.
-# Per-molecule data lives in comma-separated, position-aligned list
-# columns. The Nth comma-separated entry in every list column refers
+# TSV is the merged-row format (schema v3): one row per assembly.
+# Per-molecule data lives in pipe-separated (|), position-aligned list
+# columns. The Nth pipe-separated entry in every list column refers
 # to the same molecule. Sort order across lists is length descending.
 #
 # The SQLite build (build_alias_db.py) explodes these lists back into

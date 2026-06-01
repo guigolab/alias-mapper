@@ -24,8 +24,10 @@ name: Full alias data update (sharded)
 on:
   schedule:
     # "0 3 * * 0" = 03:00 UTC every Sunday. Quiet hour, nice to NCBI.
-    # Scheduled runs use the num_shards default (8) since there's no
-    # one to supply the input.
+    # NOTE: github.event.inputs is empty on scheduled runs, and the
+    # workflow_dispatch input `default` does NOT apply to schedules.
+    # The setup job falls back to 8 shards explicitly so the cron path
+    # works unattended.
     - cron: "0 3 * * 0"
   workflow_dispatch:
     inputs:
@@ -45,12 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.gen.outputs.shards }}
+      num_shards: ${{ steps.gen.outputs.num_shards }}
     steps:
       - name: Compute shard index list
         id: gen
         run: |
-          N="${{ github.event.inputs.num_shards }}"
-          echo "shards=$(python3 -c "import json; print(json.dumps(list(range(int('$N')))))")" >> "$GITHUB_OUTPUT"
+          # Empty on the Sunday `schedule` trigger (inputs only populate
+          # on workflow_dispatch, and the input `default` doesn't apply
+          # to schedules), so fall back to 8 here. Pass N as argv rather
+          # than interpolating it into the -c source string.
+          N="${{ github.event.inputs.num_shards || '8' }}"
+          echo "num_shards=$N" >> "$GITHUB_OUTPUT"
+          echo "shards=$(python3 -c "import json, sys; print(json.dumps(list(range(int(sys.argv[1])))))" "$N")" >> "$GITHUB_OUTPUT"
 
   # ---- catalog: the shard-independent historical artifact -------------
   catalog:
@@ -97,12 +105,12 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install certifi truststore
-      - name: Fetch shard ${{ matrix.shard }} of ${{ github.event.inputs.num_shards }}
+      - name: Fetch shard ${{ matrix.shard }} of ${{ needs.setup.outputs.num_shards }}
         run: |
           python scripts/collect_aliases.py \
             --no-cache \
             --levels "$LEVELS" \
-            --num-shards ${{ github.event.inputs.num_shards }} \
+            --num-shards ${{ needs.setup.outputs.num_shards }} \
             --shard ${{ matrix.shard }} \
             --skip-historical \
             --output aliases-shard-${{ matrix.shard }}.tsv.gz \
@@ -165,6 +173,21 @@ jobs:
           HEADERS=$(gzip -dc aliases.tsv.gz | awk -F'\t' 'NR==1{print NF}')
           FAILS=$(tail -n +2 failures.tsv | wc -l)
           echo "Merged: $ROWS assembly rows, $HEADERS columns, $FAILS failures"
+
+          # Assembly-level distribution + full-set guard. A misconfigured
+          # run (e.g. a missing --levels) still builds and releases fine
+          # but ships Chromosome+ data under the full-set tag — "green"
+          # yet wrong. assembly_level is column 7 of the TSV; refuse to
+          # publish unless Scaffold rows are present. awk reads to EOF
+          # (no early pipe close), so no SIGPIPE under pipefail.
+          echo "Assembly-level distribution:"
+          gzip -dc aliases.tsv.gz | tail -n +2 \
+            | awk -F'\t' '{c[$7]++} END {for (l in c) printf "  %8d  %s\n", c[l], l}'
+          if ! gzip -dc aliases.tsv.gz | tail -n +2 \
+            | awk -F'\t' '$7=="Scaffold"{f=1} END {exit !f}'; then
+            echo "ERROR: no Scaffold rows in merged TSV — refusing to publish full-set tag"
+            exit 1
+          fi
 
       # Gate: the merged TSV must build into SQLite before we publish.
       # Catches a corrupt merge or a schema problem here, not on a

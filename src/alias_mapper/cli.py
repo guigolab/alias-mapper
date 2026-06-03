@@ -8,6 +8,11 @@ Translates the chromosome / scaffold names in GFF, GTF, or FASTA files
 from one naming convention to another, using an alias source (SQLite
 DB today; HTTP API in the future).
 
+Input files may be gzipped: compression is detected from the file
+contents, so `genome.fa.gz` (or a gzipped file without the suffix)
+works the same as a plain file. The output is written gzipped when the
+chosen output path ends in .gz, otherwise plain.
+
 If --from or --assembly is omitted, the tool samples the input file
 and auto-detects the convention and/or assembly from the database.
 
@@ -22,6 +27,7 @@ Run `update` manually to refresh the cache with newer data.
 
 Usage:
     alias-mapper convert INPUT.gff --to ucsc -o OUTPUT.gff
+    alias-mapper convert INPUT.gff.gz --to ucsc -o OUTPUT.gff.gz
     alias-mapper convert INPUT.gff --from refseq --to ucsc \\
         --assembly GCF_000001405.40 -o OUTPUT.gff
     alias-mapper update
@@ -37,7 +43,7 @@ from .alias_source import (
     AliasNotFoundError,
     LowConfidenceDetection,
 )
-from .formats import translator_for
+from .formats import translator_for, open_text_read, open_text_write
 from .bootstrap import (
     BootstrapError,
     default_cache_path,
@@ -72,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_convert.add_argument(
         "input", type=Path,
-        help="Path to the input file (GFF, GTF, or FASTA).",
+        help="Path to the input file (GFF, GTF, or FASTA; optionally .gz).",
     )
     p_convert.add_argument(
         "--from", dest="src", choices=CONVENTIONS.keys(),
@@ -88,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_convert.add_argument(
         "-o", "--output", type=Path, required=True,
-        help="Path to write the translated file.",
+        help="Path to write the translated file (gzipped if it ends in .gz).",
     )
     p_convert.add_argument(
         "--alias-db", type=Path, default=None,
@@ -137,7 +143,8 @@ def cmd_convert(args) -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pick a translator based on the input file's extension.
+    # Pick a translator based on the input file's extension (a trailing
+    # .gz is ignored, so genome.gff.gz uses the GFF translator).
     try:
         translator = translator_for(args.input)
     except ValueError as e:
@@ -243,8 +250,10 @@ def cmd_convert(args) -> int:
     stats = {"mapped": 0, "unmapped": 0, "unmapped_examples": set()}
     print(f"Translating {args.input} → {args.output}", file=sys.stderr)
 
-    with open(args.input, "r", encoding="utf-8") as in_f, \
-         open(args.output, "w", encoding="utf-8") as out_f:
+    # open_text_read decompresses gzipped input transparently; open_text_write
+    # compresses when the output path ends in .gz.
+    with open_text_read(args.input) as in_f, \
+         open_text_write(args.output) as out_f:
         for line in in_f:
             out_f.write(translator.translate_line(line, alias_map, stats))
 

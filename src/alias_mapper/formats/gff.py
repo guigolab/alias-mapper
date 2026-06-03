@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .base import FileTranslator
+from ._io import open_text_read
 
 
 class GffTranslator(FileTranslator):
@@ -40,7 +41,7 @@ class GffTranslator(FileTranslator):
     def sample_names(self, path: Path, limit: int = 50) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
-        with open(path, "r", encoding="utf-8") as f:
+        with open_text_read(path) as f:
             for line in f:
                 if not line or line.startswith("#"):
                     continue

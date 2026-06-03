@@ -38,6 +38,10 @@ dependencies = [
 trusted = [
     "truststore",
 ]
+# Test dependencies. Install with: pip install -e .[test]
+test = [
+    "pytest>=7",
+]
 
 [project.urls]
 Homepage = "https://github.com/Max25R/alias-mapper"
@@ -49,3 +53,10 @@ alias-mapper = "alias_mapper.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["alias_mapper*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put src/ on sys.path so `pytest` finds the package without an install
+# (CI does `pip install -e .[test]`, but this keeps a bare `pytest` working
+# locally too). pythonpath requires pytest >= 7.
+pythonpath = ["src"]

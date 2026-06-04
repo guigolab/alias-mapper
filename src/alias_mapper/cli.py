@@ -8,26 +8,37 @@ Translates the chromosome / scaffold names in GFF, GTF, or FASTA files
 from one naming convention to another, using an alias source (SQLite
 DB today; HTTP API in the future).
 
-Input files may be gzipped: compression is detected from the file
-contents, so `genome.fa.gz` (or a gzipped file without the suffix)
-works the same as a plain file. The output is written gzipped when the
-chosen output path ends in .gz, otherwise plain.
+Two modes of `convert`:
 
-If --from or --assembly is omitted, the tool samples the input file
-and auto-detects the convention and/or assembly from the database.
+  Single file:
+      alias-mapper convert INPUT --to ucsc -o OUTPUT
+  Multi file (one reference FASTA + its annotation files):
+      alias-mapper convert --fasta REF.fa ANN1.gff ANN2.gtf --to ucsc --out-dir OUT/
+
+In multi-file mode the source convention and assembly are detected ONCE
+from the FASTA, then applied to the FASTA and every annotation file —
+matching the common workflow where a genome and its annotations share a
+naming convention. Outputs are written to --out-dir as
+`<stem>.<to>.<ext>` (gzip preserved).
+
+Input files may be gzipped: compression is detected from contents, and
+output is gzipped when the chosen path ends in .gz.
+
+If --from or --assembly is omitted, the tool samples the input (or the
+FASTA, in multi-file mode) and auto-detects from the database.
 
 Subcommands:
-    convert   Translate one file from one convention to another.
+    convert   Translate one file, or a FASTA + its annotation files.
     update    Re-download the latest alias data and rebuild the cache.
 
-The first time `convert` is run, the tool downloads the latest alias
-TSV from GitHub Releases and builds a local SQLite database in the
-platform cache directory. Subsequent invocations use that cache.
-Run `update` manually to refresh the cache with newer data.
+On first run `convert` downloads the latest alias TSV from GitHub
+Releases and builds a local SQLite database in the platform cache
+directory; later invocations reuse it. Run `update` to refresh.
 
 Usage:
     alias-mapper convert INPUT.gff --to ucsc -o OUTPUT.gff
     alias-mapper convert INPUT.gff.gz --to ucsc -o OUTPUT.gff.gz
+    alias-mapper convert --fasta REF.fa ann1.gff ann2.gtf --to ucsc --out-dir out/
     alias-mapper convert INPUT.gff --from refseq --to ucsc \\
         --assembly GCF_000001405.40 -o OUTPUT.gff
     alias-mapper update
@@ -67,18 +78,36 @@ COLUMN_TO_CONVENTION = {v: k for k, v in CONVENTIONS.items()}
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alias-mapper",
-        description="Translate sequence names in a GFF/GTF/FASTA file.",
+        description="Translate sequence names in GFF/GTF/FASTA files.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # convert ---------------------------------------------------------------
     p_convert = subparsers.add_parser(
         "convert",
-        help="Translate one file from one naming convention to another.",
+        help="Translate one file, or a FASTA plus its annotation files.",
+        description=(
+            "Single-file:  convert INPUT --to TGT -o OUT\n"
+            "Multi-file:   convert --fasta REF [ANN ...] --to TGT --out-dir DIR\n\n"
+            "In multi-file mode, convention and assembly are detected once from "
+            "the FASTA and applied to the FASTA and every annotation file."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_convert.add_argument(
-        "input", type=Path,
-        help="Path to the input file (GFF, GTF, or FASTA; optionally .gz).",
+        "input", type=Path, nargs="*",
+        help=(
+            "Single-file mode: one input file (GFF, GTF, or FASTA; optionally "
+            ".gz). Multi-file mode (with --fasta): the annotation files to "
+            "convert alongside the FASTA."
+        ),
+    )
+    p_convert.add_argument(
+        "--fasta", type=Path, default=None,
+        help=(
+            "Reference FASTA. Enables multi-file mode: detect convention and "
+            "assembly from this FASTA, then apply to it and all annotation inputs."
+        ),
     )
     p_convert.add_argument(
         "--from", dest="src", choices=CONVENTIONS.keys(),
@@ -93,8 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Assembly accession (e.g. GCF_000001405.40). Auto-detected if omitted.",
     )
     p_convert.add_argument(
-        "-o", "--output", type=Path, required=True,
-        help="Path to write the translated file (gzipped if it ends in .gz).",
+        "-o", "--output", type=Path, default=None,
+        help="Output path (single-file mode only; gzipped if it ends in .gz).",
+    )
+    p_convert.add_argument(
+        "--out-dir", dest="out_dir", type=Path, default=None,
+        help=(
+            "Output directory (multi-file/--fasta mode only). Each input is "
+            "written as <stem>.<to>.<ext>, preserving any .gz."
+        ),
     )
     p_convert.add_argument(
         "--alias-db", type=Path, default=None,
@@ -130,27 +166,8 @@ def cmd_update(args) -> int:
     return 0
 
 
-def cmd_convert(args) -> int:
-    """Translate one file from --from to --to."""
-    if not args.input.exists():
-        sys.exit(f"error: input file not found: {args.input}")
-
-    if args.output.exists():
-        sys.exit(
-            f"error: output file already exists: {args.output} "
-            f"(refusing to overwrite — choose another path or delete it first)"
-        )
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    # Pick a translator based on the input file's extension (a trailing
-    # .gz is ignored, so genome.gff.gz uses the GFF translator).
-    try:
-        translator = translator_for(args.input)
-    except ValueError as e:
-        sys.exit(f"error: {e}")
-
-    # Ensure the local DB exists. On first run this downloads + builds it.
+def _open_source(args):
+    """Resolve --alias-db (or the cached default) and open a SqliteAliasSource."""
     # If --alias-db was explicitly passed and doesn't exist, that's a user
     # error: don't surprise them by auto-downloading to a path they chose.
     if args.alias_db is not None and not args.alias_db.exists():
@@ -159,32 +176,35 @@ def cmd_convert(args) -> int:
             f"Either omit --alias-db to use the cached default, or run "
             f"`alias-mapper update --alias-db {args.alias_db}` to create it there."
         )
-
     try:
         db_path = ensure_db(args.alias_db)
     except BootstrapError as e:
         sys.exit(f"error: {e}")
+    return SqliteAliasSource(db_path), db_path
 
-    source = SqliteAliasSource(db_path)
 
-    # Auto-detect what's missing. Only sample the input file if we
-    # actually need to — if both --from and --assembly are given,
-    # we skip the sampling entirely.
+def _resolve_from_assembly(source, sample_path, args):
+    """
+    Determine (src_col, src_name, assembly), sampling names from
+    `sample_path` to auto-detect whichever of --from / --assembly was
+    omitted. In multi-file mode `sample_path` is the FASTA, so detection
+    happens once and is reused for every annotation file.
+    """
+    translator = translator_for(sample_path)
     sample = None
     if args.src is None or args.assembly is None:
-        sample = translator.sample_names(args.input)
+        sample = translator.sample_names(sample_path)
         if not sample:
             sys.exit(
-                f"error: no sequence names found in {args.input} for auto-detection. "
+                f"error: no sequence names found in {sample_path} for auto-detection. "
                 f"Pass --from and --assembly explicitly."
             )
         print(
-            f"Sampled {len(sample)} unique sequence names from {args.input} "
+            f"Sampled {len(sample)} unique sequence names from {sample_path} "
             f"for auto-detection.",
             file=sys.stderr,
         )
 
-    # Resolve --from.
     if args.src is None:
         try:
             result = source.detect_convention(sample)
@@ -202,7 +222,6 @@ def cmd_convert(args) -> int:
         src_col = CONVENTIONS[args.src]
         src_name = args.src
 
-    # Resolve --assembly.
     if args.assembly is None:
         try:
             result = source.detect_assembly(sample)
@@ -218,20 +237,16 @@ def cmd_convert(args) -> int:
     else:
         assembly = args.assembly
 
-    tgt_col = CONVENTIONS[args.tgt]
+    return src_col, src_name, assembly
 
+
+def _load_map(source, assembly, src_col, src_name, tgt_col):
+    """Fetch the {source_name -> target_name} map for one assembly."""
     if src_col == tgt_col:
         sys.exit(
             f"error: source and target conventions are the same ({src_name}). "
             f"Nothing to translate."
         )
-
-    print(
-        f"Loading alias table from {db_path}\n"
-        f"  assembly={assembly}, from={src_name}, to={args.tgt}",
-        file=sys.stderr,
-    )
-
     try:
         alias_map = source.get_map(assembly, src_col, tgt_col)
     except AssemblyNotFoundError:
@@ -241,34 +256,165 @@ def cmd_convert(args) -> int:
         )
     except AliasNotFoundError as e:
         sys.exit(
-            f"error: {e}. "
-            f"This assembly may not have aliases in those conventions."
+            f"error: {e}. This assembly may not have aliases in those conventions."
         )
-
     print(f"  -> {len(alias_map)} entries loaded", file=sys.stderr)
+    return alias_map
 
+
+def _translate_file(in_path: Path, out_path: Path, alias_map: dict) -> dict:
+    """Translate one file with a prepared alias map. Returns its stats."""
+    translator = translator_for(in_path)
     stats = {"mapped": 0, "unmapped": 0, "unmapped_examples": set()}
-    print(f"Translating {args.input} → {args.output}", file=sys.stderr)
-
-    # open_text_read decompresses gzipped input transparently; open_text_write
-    # compresses when the output path ends in .gz.
-    with open_text_read(args.input) as in_f, \
-         open_text_write(args.output) as out_f:
+    print(f"Translating {in_path} → {out_path}", file=sys.stderr)
+    with open_text_read(in_path) as in_f, open_text_write(out_path) as out_f:
         for line in in_f:
             out_f.write(translator.translate_line(line, alias_map, stats))
-
     print(
-        f"Done. mapped={stats['mapped']}, unmapped={stats['unmapped']}",
+        f"  {in_path.name}: mapped={stats['mapped']}, unmapped={stats['unmapped']}",
         file=sys.stderr,
     )
     if stats["unmapped"]:
         examples = sorted(stats["unmapped_examples"])[:5]
         print(
-            f"  warning: {stats['unmapped']} rows had sequence names not found "
-            f"in the alias database for assembly {assembly}. "
-            f"Examples: {examples}. These rows were passed through unchanged.",
+            f"  warning: {stats['unmapped']} names in {in_path.name} not found in "
+            f"the alias database for this assembly; passed through unchanged. "
+            f"Examples: {examples}",
             file=sys.stderr,
         )
+    return stats
+
+
+def _output_name(in_path: Path, to: str) -> str:
+    """
+    Build the multi-file output filename: insert `.<to>` before the
+    extension(s), preserving a trailing .gz.
+
+    genome.fa.gz -> genome.<to>.fa.gz ; ann1.gff -> ann1.<to>.gff
+    """
+    p = Path(in_path)
+    if p.suffix.lower() == ".gz":
+        base = Path(p.stem).stem
+        exts = Path(p.stem).suffix + p.suffix
+    else:
+        base = p.stem
+        exts = p.suffix
+    return f"{base}.{to}{exts}"
+
+
+def cmd_convert(args) -> int:
+    """Dispatch to single-file or multi-file (--fasta) translation."""
+    if args.fasta is not None:
+        return _convert_multi(args)
+    return _convert_single(args)
+
+
+def _convert_single(args) -> int:
+    if args.out_dir is not None:
+        sys.exit(
+            "error: --out-dir is only for --fasta (multi-file) mode. "
+            "Use -o for single-file output."
+        )
+    if len(args.input) != 1:
+        sys.exit(
+            "error: single-file mode takes exactly one input file. For multiple "
+            "files use --fasta REF ANN... with --out-dir."
+        )
+    if args.output is None:
+        sys.exit("error: -o/--output is required in single-file mode.")
+
+    in_path, out_path = args.input[0], args.output
+    if not in_path.exists():
+        sys.exit(f"error: input file not found: {in_path}")
+    if out_path.exists():
+        sys.exit(
+            f"error: output file already exists: {out_path} "
+            f"(refusing to overwrite — choose another path or delete it first)"
+        )
+    try:
+        translator_for(in_path)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    source, db_path = _open_source(args)
+    src_col, src_name, assembly = _resolve_from_assembly(source, in_path, args)
+    tgt_col = CONVENTIONS[args.tgt]
+    print(
+        f"Loading alias table from {db_path}\n"
+        f"  assembly={assembly}, from={src_name}, to={args.tgt}",
+        file=sys.stderr,
+    )
+    alias_map = _load_map(source, assembly, src_col, src_name, tgt_col)
+    _translate_file(in_path, out_path, alias_map)
+    print("Done.", file=sys.stderr)
+    return 0
+
+
+def _convert_multi(args) -> int:
+    if args.output is not None:
+        sys.exit(
+            "error: -o/--output is for single-file mode. In --fasta mode, "
+            "outputs go to --out-dir."
+        )
+    if args.out_dir is None:
+        sys.exit("error: --out-dir is required in --fasta (multi-file) mode.")
+
+    fasta = args.fasta
+    if not fasta.exists():
+        sys.exit(f"error: FASTA not found: {fasta}")
+    annotations = list(args.input)
+    for f in annotations:
+        if not f.exists():
+            sys.exit(f"error: input file not found: {f}")
+
+    # Validate every translator up front so a bad extension fails before
+    # we touch the (possibly large) database download.
+    for f in [fasta, *annotations]:
+        try:
+            translator_for(f)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+
+    # Plan outputs, refusing both overwrites and same-output collisions.
+    out_dir = args.out_dir
+    planned, seen = [], {}
+    for f in [fasta, *annotations]:
+        out_path = out_dir / _output_name(f, args.tgt)
+        if out_path in seen:
+            sys.exit(
+                f"error: inputs {seen[out_path]} and {f} both map to output "
+                f"{out_path.name}. Rename one."
+            )
+        seen[out_path] = f
+        if out_path.exists():
+            sys.exit(f"error: output already exists: {out_path} (refusing to overwrite).")
+        planned.append((f, out_path))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source, db_path = _open_source(args)
+
+    # Detect ONCE from the FASTA, then reuse for every file.
+    src_col, src_name, assembly = _resolve_from_assembly(source, fasta, args)
+    tgt_col = CONVENTIONS[args.tgt]
+    print(
+        f"Loading alias table from {db_path}\n"
+        f"  assembly={assembly}, from={src_name}, to={args.tgt}",
+        file=sys.stderr,
+    )
+    alias_map = _load_map(source, assembly, src_col, src_name, tgt_col)
+
+    print(f"Converting {len(planned)} file(s) into {out_dir}/", file=sys.stderr)
+    totals = {"mapped": 0, "unmapped": 0}
+    for in_path, out_path in planned:
+        stats = _translate_file(in_path, out_path, alias_map)
+        totals["mapped"] += stats["mapped"]
+        totals["unmapped"] += stats["unmapped"]
+    print(
+        f"Done. {len(planned)} files, total mapped={totals['mapped']}, "
+        f"unmapped={totals['unmapped']}",
+        file=sys.stderr,
+    )
     return 0
 
 

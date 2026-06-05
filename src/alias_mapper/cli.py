@@ -8,18 +8,26 @@ Translates the chromosome / scaffold names in GFF, GTF, or FASTA files
 from one naming convention to another, using an alias source (SQLite
 DB today; HTTP API in the future).
 
-Two modes of `convert`:
+Modes of `convert`:
 
   Single file:
       alias-mapper convert INPUT --to ucsc -o OUTPUT
-  Multi file (one reference FASTA + its annotation files):
-      alias-mapper convert --fasta REF.fa ANN1.gff ANN2.gtf --to ucsc --out-dir OUT/
+  Multi file, conform (omit --to): conform the annotations to whatever
+  convention the reference FASTA is already in; the FASTA is left
+  untouched:
+      alias-mapper convert --fasta REF.fa ANN1.gff ANN2.gtf --out-dir OUT/
+  Multi file, overwrite (--overwrite-to): convert the FASTA and every
+  annotation into one chosen convention:
+      alias-mapper convert --fasta REF.fa ANN1.gff --overwrite-to ucsc --out-dir OUT/
 
-In multi-file mode the source convention and assembly are detected ONCE
-from the FASTA, then applied to the FASTA and every annotation file —
-matching the common workflow where a genome and its annotations share a
-naming convention. Outputs are written to --out-dir as
-`<stem>.<to>.<ext>` (gzip preserved).
+In multi-file mode the assembly is detected ONCE from the FASTA. Conform
+mode then maps any recognized name (in any convention) to the FASTA's own
+convention, matching the common workflow where you have one genome and
+want its annotations to line up with it. Overwrite mode instead detects
+the shared source convention from the FASTA and forces everything to the
+target. Outputs are written to --out-dir as `<stem>.<conv>.<ext>` (gzip
+preserved); in conform mode the FASTA itself is not written, since it is
+unchanged.
 
 Input files may be gzipped: compression is detected from contents, and
 output is gzipped when the chosen path ends in .gz.
@@ -38,7 +46,8 @@ directory; later invocations reuse it. Run `update` to refresh.
 Usage:
     alias-mapper convert INPUT.gff --to ucsc -o OUTPUT.gff
     alias-mapper convert INPUT.gff.gz --to ucsc -o OUTPUT.gff.gz
-    alias-mapper convert --fasta REF.fa ann1.gff ann2.gtf --to ucsc --out-dir out/
+    alias-mapper convert --fasta REF.fa ann1.gff ann2.gtf --out-dir out/
+    alias-mapper convert --fasta REF.fa ann1.gff --overwrite-to ucsc --out-dir out/
     alias-mapper convert INPUT.gff --from refseq --to ucsc \\
         --assembly GCF_000001405.40 -o OUTPUT.gff
     alias-mapper update
@@ -53,6 +62,7 @@ from .alias_source import (
     AssemblyNotFoundError,
     AliasNotFoundError,
     LowConfidenceDetection,
+    CONVENTION_COLUMNS,
 )
 from .formats import translator_for, open_text_read, open_text_write
 from .bootstrap import (
@@ -87,10 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
         "convert",
         help="Translate one file, or a FASTA plus its annotation files.",
         description=(
-            "Single-file:  convert INPUT --to TGT -o OUT\n"
-            "Multi-file:   convert --fasta REF [ANN ...] --to TGT --out-dir DIR\n\n"
-            "In multi-file mode, convention and assembly are detected once from "
-            "the FASTA and applied to the FASTA and every annotation file."
+            "Single-file:        convert INPUT --to TGT -o OUT\n"
+            "Multi-file conform: convert --fasta REF [ANN ...] --out-dir DIR\n"
+            "Multi-file force:   convert --fasta REF [ANN ...] --overwrite-to TGT --out-dir DIR\n\n"
+            "In multi-file mode the assembly is detected once from the FASTA. "
+            "Without --overwrite-to, the annotations are conformed to the "
+            "FASTA's own convention and the FASTA is left unchanged. With "
+            "--overwrite-to, the FASTA and every annotation are forced to the "
+            "target convention."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -105,17 +119,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_convert.add_argument(
         "--fasta", type=Path, default=None,
         help=(
-            "Reference FASTA. Enables multi-file mode: detect convention and "
-            "assembly from this FASTA, then apply to it and all annotation inputs."
+            "Reference FASTA. Enables multi-file mode: detect the assembly "
+            "from this FASTA, then conform the annotation inputs to its "
+            "convention (or, with --overwrite-to, force everything to a "
+            "chosen convention)."
         ),
     )
     p_convert.add_argument(
         "--from", dest="src", choices=CONVENTIONS.keys(),
-        help="Source naming convention. Auto-detected if omitted.",
+        help=(
+            "Source naming convention. Auto-detected if omitted. Not used in "
+            "conform mode (the FASTA's convention is the target there)."
+        ),
     )
     p_convert.add_argument(
-        "--to", dest="tgt", required=True, choices=CONVENTIONS.keys(),
-        help="Target naming convention.",
+        "--to", dest="tgt", choices=CONVENTIONS.keys(),
+        help=(
+            "Target naming convention. Required in single-file mode. In "
+            "--fasta mode use --overwrite-to instead (or omit to conform)."
+        ),
+    )
+    p_convert.add_argument(
+        "--overwrite-to", dest="overwrite_to", choices=CONVENTIONS.keys(),
+        help=(
+            "(--fasta mode) Force the FASTA and all annotations to this "
+            "convention. Omit to conform the annotations to the FASTA's own "
+            "convention, leaving the FASTA unchanged."
+        ),
     )
     p_convert.add_argument(
         "--assembly",
@@ -128,8 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_convert.add_argument(
         "--out-dir", dest="out_dir", type=Path, default=None,
         help=(
-            "Output directory (multi-file/--fasta mode only). Each input is "
-            "written as <stem>.<to>.<ext>, preserving any .gz."
+            "Output directory (multi-file/--fasta mode only). Each converted "
+            "input is written as <stem>.<conv>.<ext>, preserving any .gz."
         ),
     )
     p_convert.add_argument(
@@ -183,12 +213,15 @@ def _open_source(args):
     return SqliteAliasSource(db_path), db_path
 
 
-def _resolve_from_assembly(source, sample_path, args):
+def _resolve_from_assembly(source, sample_path, args, role="source convention"):
     """
-    Determine (src_col, src_name, assembly), sampling names from
+    Determine (conv_col, conv_name, assembly), sampling names from
     `sample_path` to auto-detect whichever of --from / --assembly was
     omitted. In multi-file mode `sample_path` is the FASTA, so detection
     happens once and is reused for every annotation file.
+
+    `role` only changes the label printed for the detected convention,
+    so conform mode can report it as the target rather than the source.
     """
     translator = translator_for(sample_path)
     sample = None
@@ -210,17 +243,17 @@ def _resolve_from_assembly(source, sample_path, args):
             result = source.detect_convention(sample)
         except LowConfidenceDetection as e:
             sys.exit(f"error: {e}")
-        src_col = result.winner
-        src_name = COLUMN_TO_CONVENTION.get(src_col, src_col)
+        conv_col = result.winner
+        conv_name = COLUMN_TO_CONVENTION.get(conv_col, conv_col)
         print(
-            f"  detected source convention: {src_name} "
+            f"  detected {role}: {conv_name} "
             f"({result.winner_score}/{len(sample)} matches, "
             f"runner-up {result.runner_up_score})",
             file=sys.stderr,
         )
     else:
-        src_col = CONVENTIONS[args.src]
-        src_name = args.src
+        conv_col = CONVENTIONS[args.src]
+        conv_name = args.src
 
     if args.assembly is None:
         try:
@@ -237,7 +270,7 @@ def _resolve_from_assembly(source, sample_path, args):
     else:
         assembly = args.assembly
 
-    return src_col, src_name, assembly
+    return conv_col, conv_name, assembly
 
 
 def _load_map(source, assembly, src_col, src_name, tgt_col):
@@ -262,8 +295,66 @@ def _load_map(source, assembly, src_col, src_name, tgt_col):
     return alias_map
 
 
-def _translate_file(in_path: Path, out_path: Path, alias_map: dict) -> dict:
-    """Translate one file with a prepared alias map. Returns its stats."""
+def _load_conform_map(source, assembly, target_col, target_name):
+    """
+    Build a {any_convention_name -> target_name} map for conform mode.
+
+    Merges get_map() across every convention column except the target,
+    so a name in any recognized convention resolves to the FASTA's
+    convention. Convention columns with no rows paired to the target for
+    this assembly are skipped.
+
+    This is built from the existing one-source/one-target get_map, so it
+    needs no change to the AliasSource interface. A consequence: names
+    that are *already* in the target convention are not keys here, so
+    they pass through unchanged (the correct output) but land in the
+    "unmapped" tally — see the conform-mode note in _translate_file.
+    """
+    if not source.assembly_exists(assembly):
+        sys.exit(
+            f"error: assembly {assembly!r} not found in the database. "
+            f"Check the --assembly value."
+        )
+    conform_map: dict[str, str] = {}
+    contributing: list[str] = []
+    for col in CONVENTION_COLUMNS:
+        if col == target_col:
+            continue
+        try:
+            partial = source.get_map(assembly, col, target_col)
+        except AliasNotFoundError:
+            # This convention has no rows paired with the target for this
+            # assembly (e.g. RefSeq/UCSC absent). Nothing to contribute.
+            continue
+        conform_map.update(partial)
+        contributing.append(COLUMN_TO_CONVENTION.get(col, col))
+
+    if contributing:
+        print(
+            f"  conform map: {len(conform_map)} names -> {target_name} "
+            f"(from {', '.join(contributing)})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"  warning: no other convention has data paired to {target_name} "
+            f"for this assembly; nothing can be conformed. Annotation names "
+            f"already in {target_name} will pass through unchanged.",
+            file=sys.stderr,
+        )
+    return conform_map
+
+
+def _translate_file(in_path: Path, out_path: Path, alias_map: dict,
+                    conform_target: str | None = None) -> dict:
+    """
+    Translate one file with a prepared alias map. Returns its stats.
+
+    When `conform_target` is set (conform mode), the passthrough message
+    is worded as a neutral note rather than a warning: a name that is
+    already in the target convention is not in the conform map and so is
+    correctly left unchanged, which is not an error.
+    """
     translator = translator_for(in_path)
     stats = {"mapped": 0, "unmapped": 0, "unmapped_examples": set()}
     print(f"Translating {in_path} → {out_path}", file=sys.stderr)
@@ -276,12 +367,20 @@ def _translate_file(in_path: Path, out_path: Path, alias_map: dict) -> dict:
     )
     if stats["unmapped"]:
         examples = sorted(stats["unmapped_examples"])[:5]
-        print(
-            f"  warning: {stats['unmapped']} names in {in_path.name} not found in "
-            f"the alias database for this assembly; passed through unchanged. "
-            f"Examples: {examples}",
-            file=sys.stderr,
-        )
+        if conform_target is not None:
+            print(
+                f"  note: {stats['unmapped']} names in {in_path.name} were already "
+                f"in {conform_target} convention or not recognized; passed through "
+                f"unchanged. Examples: {examples}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"  warning: {stats['unmapped']} names in {in_path.name} not found in "
+                f"the alias database for this assembly; passed through unchanged. "
+                f"Examples: {examples}",
+                file=sys.stderr,
+            )
     return stats
 
 
@@ -310,6 +409,13 @@ def cmd_convert(args) -> int:
 
 
 def _convert_single(args) -> int:
+    if args.overwrite_to is not None:
+        sys.exit(
+            "error: --overwrite-to is only for --fasta (multi-file) mode. "
+            "Use --to for single-file output."
+        )
+    if args.tgt is None:
+        sys.exit("error: --to is required in single-file mode.")
     if args.out_dir is not None:
         sys.exit(
             "error: --out-dir is only for --fasta (multi-file) mode. "
@@ -359,6 +465,12 @@ def _convert_multi(args) -> int:
         )
     if args.out_dir is None:
         sys.exit("error: --out-dir is required in --fasta (multi-file) mode.")
+    if args.tgt is not None:
+        sys.exit(
+            "error: --to is single-file only. In --fasta mode, use "
+            "--overwrite-to to force every file into one convention, or omit "
+            "it to conform the annotations to the FASTA's own convention."
+        )
 
     fasta = args.fasta
     if not fasta.exists():
@@ -368,6 +480,19 @@ def _convert_multi(args) -> int:
         if not f.exists():
             sys.exit(f"error: input file not found: {f}")
 
+    conform = args.overwrite_to is None
+    if conform and args.src is not None:
+        sys.exit(
+            "error: --from is not used in conform mode. The FASTA's own "
+            "convention is detected and used as the target. To force a "
+            "specific convention for every file, use --overwrite-to."
+        )
+    if conform and not annotations:
+        sys.exit(
+            "error: conform mode needs at least one annotation file to conform "
+            "to the FASTA. (To convert just the FASTA, use --overwrite-to.)"
+        )
+
     # Validate every translator up front so a bad extension fails before
     # we touch the (possibly large) database download.
     for f in [fasta, *annotations]:
@@ -376,11 +501,28 @@ def _convert_multi(args) -> int:
         except ValueError as e:
             sys.exit(f"error: {e}")
 
-    # Plan outputs, refusing both overwrites and same-output collisions.
     out_dir = args.out_dir
+    source, db_path = _open_source(args)
+
+    # Detect from the FASTA. In conform mode the FASTA's convention is the
+    # target; in overwrite mode it's the (shared) source convention. The
+    # assembly is detected from the FASTA either way. Output naming and
+    # planning need the convention name, so this runs before planning.
+    if conform:
+        tgt_col, tgt_name, assembly = _resolve_from_assembly(
+            source, fasta, args, role="FASTA convention (conform target)"
+        )
+        files_to_convert = annotations  # FASTA is the reference, left untouched
+    else:
+        src_col, src_name, assembly = _resolve_from_assembly(source, fasta, args)
+        tgt_name = args.overwrite_to
+        tgt_col = CONVENTIONS[args.overwrite_to]
+        files_to_convert = [fasta, *annotations]
+
+    # Plan outputs, refusing both overwrites and same-output collisions.
     planned, seen = [], {}
-    for f in [fasta, *annotations]:
-        out_path = out_dir / _output_name(f, args.tgt)
+    for f in files_to_convert:
+        out_path = out_dir / _output_name(f, tgt_name)
         if out_path in seen:
             sys.exit(
                 f"error: inputs {seen[out_path]} and {f} both map to output "
@@ -392,26 +534,35 @@ def _convert_multi(args) -> int:
         planned.append((f, out_path))
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    source, db_path = _open_source(args)
 
-    # Detect ONCE from the FASTA, then reuse for every file.
-    src_col, src_name, assembly = _resolve_from_assembly(source, fasta, args)
-    tgt_col = CONVENTIONS[args.tgt]
     print(
         f"Loading alias table from {db_path}\n"
-        f"  assembly={assembly}, from={src_name}, to={args.tgt}",
+        f"  assembly={assembly}, target={tgt_name}, "
+        f"mode={'conform' if conform else 'overwrite'}",
         file=sys.stderr,
     )
-    alias_map = _load_map(source, assembly, src_col, src_name, tgt_col)
 
-    print(f"Converting {len(planned)} file(s) into {out_dir}/", file=sys.stderr)
+    if conform:
+        alias_map = _load_conform_map(source, assembly, tgt_col, tgt_name)
+        conform_target = tgt_name
+        print(
+            f"Conforming {len(planned)} annotation file(s) to {tgt_name} in "
+            f"{out_dir}/; FASTA {fasta.name} left unchanged.",
+            file=sys.stderr,
+        )
+    else:
+        alias_map = _load_map(source, assembly, src_col, src_name, tgt_col)
+        conform_target = None
+        print(f"Converting {len(planned)} file(s) into {out_dir}/", file=sys.stderr)
+
     totals = {"mapped": 0, "unmapped": 0}
     for in_path, out_path in planned:
-        stats = _translate_file(in_path, out_path, alias_map)
+        stats = _translate_file(in_path, out_path, alias_map,
+                                conform_target=conform_target)
         totals["mapped"] += stats["mapped"]
         totals["unmapped"] += stats["unmapped"]
     print(
-        f"Done. {len(planned)} files, total mapped={totals['mapped']}, "
+        f"Done. {len(planned)} file(s), total mapped={totals['mapped']}, "
         f"unmapped={totals['unmapped']}",
         file=sys.stderr,
     )

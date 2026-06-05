@@ -9,6 +9,10 @@ Input and output may be gzipped transparently; see _io for the rules.
 Format detection ignores a trailing .gz, so `genome.fa.gz` resolves to
 the FASTA translator.
 
+Name lookup during translation goes through resolve_alias (see
+_resolve), which falls back to conservative name normalizations only
+when an exact map hit is missing.
+
 Adding a new format: write a class in a new module, import it here,
 add an entry to TRANSLATORS.
 """
@@ -17,6 +21,7 @@ from .base import FileTranslator
 from .gff import GffTranslator
 from .fasta import FastaTranslator
 from ._io import open_text_read, open_text_write, is_gzip, effective_suffix
+from ._resolve import resolve_alias
 
 # Extension → translator class. The CLI uses this to pick a translator
 # based on the input file's suffix (a trailing .gz is stripped first).
@@ -59,4 +64,5 @@ __all__ = [
     "open_text_write",
     "is_gzip",
     "effective_suffix",
+    "resolve_alias",
 ]

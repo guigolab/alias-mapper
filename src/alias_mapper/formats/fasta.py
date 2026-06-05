@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .base import FileTranslator
 from ._io import open_text_read
+from ._resolve import resolve_alias
 
 
 class FastaTranslator(FileTranslator):
@@ -19,11 +20,15 @@ class FastaTranslator(FileTranslator):
       - Blank lines pass through unchanged.
 
     Translation rule:
-      - If the header's name is in the alias map, replace the name with
-        the target. Description is preserved exactly.
-      - If the name isn't in the alias map, pass the whole line through
+      - If the header's name resolves in the alias map, replace the name
+        with the target. Description is preserved exactly.
+      - If the name doesn't resolve, pass the whole line through
         unchanged and count it as unmapped (same warn-and-pass-through
         behavior as the GFF translator).
+
+    Name lookup goes through resolve_alias: an exact map hit is used when
+    present, and conservative fallbacks (ENA prefix strip, .N/vN
+    version-separator swap) are tried only when the exact name misses.
     """
 
     def translate_line(self, line: str, alias_map: dict, stats: dict) -> str:
@@ -55,7 +60,7 @@ class FastaTranslator(FileTranslator):
             # translate; pass through unchanged.
             return line
 
-        new_name = alias_map.get(name)
+        new_name = resolve_alias(name, alias_map)
         if new_name is None:
             stats["unmapped"] += 1
             stats["unmapped_examples"].add(name)

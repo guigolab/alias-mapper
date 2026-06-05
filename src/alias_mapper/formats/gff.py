@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .base import FileTranslator
 from ._io import open_text_read
+from ._resolve import resolve_alias
 
 
 class GffTranslator(FileTranslator):
@@ -13,6 +14,11 @@ class GffTranslator(FileTranslator):
     All three are tab-separated with the sequence name in column 1.
     Lines starting with '#' are comments/headers and pass through
     unchanged.
+
+    Name lookup goes through resolve_alias, so an exact map hit is used
+    when present and a small set of conservative fallbacks (ENA prefix
+    strip, .N/vN version-separator swap) is tried only when the exact
+    name misses.
 
     Known limitation: '##sequence-region <name> ...' metadata lines
     contain a sequence name that v0.2 does not translate. The design
@@ -28,7 +34,7 @@ class GffTranslator(FileTranslator):
             return line
 
         seq_name = parts[0]
-        new_name = alias_map.get(seq_name)
+        new_name = resolve_alias(seq_name, alias_map)
         if new_name is None:
             stats["unmapped"] += 1
             stats["unmapped_examples"].add(seq_name)

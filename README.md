@@ -54,13 +54,22 @@ through unchanged with a warning).
 ## Usage
 
 ```
+# single file
 alias-mapper convert <input> --to <convention> -o <output> [options]
+
+# multi-file: conform annotations to a reference FASTA (FASTA untouched)
+alias-mapper convert --fasta <ref> [<ann> ...] --out-dir <dir> [options]
+
+# multi-file: force the FASTA and annotations to one convention
+alias-mapper convert --fasta <ref> [<ann> ...] --overwrite-to <convention> --out-dir <dir>
+
 alias-mapper update
 ```
 
 ### Subcommands
 
-- **`convert`** — translate one file from one convention to another.
+- **`convert`** — translate a single file, or a reference FASTA plus
+  its annotation files (multi-file mode; see [Multi-file mode](#multi-file-mode)).
 - **`update`** — re-download the latest alias data and rebuild the
   cached database. Run manually when you want newer data.
 
@@ -93,19 +102,52 @@ alias-mapper convert reference.fa \
     --assembly GCA_963924405.1 \
     -o reference.renamed.fa
 
+# Multi-file conform: rewrite the annotations to match reference.fa's
+# own convention; reference.fa is left untouched
+alias-mapper convert --fasta reference.fa genes.gff peaks.bed.gff \
+    --out-dir conformed/
+
+# Multi-file overwrite: force reference.fa and its annotations to UCSC
+alias-mapper convert --fasta reference.fa genes.gff \
+    --overwrite-to ucsc --out-dir ucsc_out/
+
 # Refresh the cached alias data
 alias-mapper update
 ```
 
+### Multi-file mode
+
+Pass `--fasta <ref>` to process a reference FASTA together with its
+annotation files in one invocation. The assembly is detected once from
+the FASTA and the alias table is loaded once for the whole batch.
+Outputs go to `--out-dir`, named `<stem>.<convention>.<ext>` (gzip
+preserved).
+
+There are two modes:
+
+- **Conform** (the default, when `--overwrite-to` is omitted): each
+  annotation is rewritten to match the FASTA's *own* convention, and
+  the FASTA is left unchanged. Use this to make a set of annotations
+  agree with a genome you already have. The FASTA is not copied into
+  the output directory, since it is unchanged.
+- **Overwrite** (`--overwrite-to <convention>`): the FASTA and every
+  annotation are converted to the named convention.
+
+`--to` is single-file only; in `--fasta` mode use `--overwrite-to`
+(or omit it to conform).
+
 ### Flags (`convert`)
 
-| Flag         | Required | Purpose                                                  |
-| ------------ | -------- | -------------------------------------------------------- |
-| `--to`       | yes      | Target naming convention                                 |
-| `-o`         | yes      | Output path                                              |
-| `--from`     | no       | Source convention. Auto-detected if absent               |
-| `--assembly` | no       | Assembly accession. Auto-detected if absent              |
-| `--alias-db` | no       | Path to a specific alias SQLite database (overrides cache) |
+| Flag             | Mode        | Purpose                                                       |
+| ---------------- | ----------- | ------------------------------------------------------------- |
+| `--to`           | single-file | Target naming convention (required in single-file mode)       |
+| `-o`             | single-file | Output path                                                   |
+| `--fasta`        | multi-file  | Reference FASTA; enables multi-file mode                      |
+| `--overwrite-to` | multi-file  | Force the FASTA and all annotations to this convention        |
+| `--out-dir`      | multi-file  | Output directory for the converted files                      |
+| `--from`         | both        | Source convention. Auto-detected if absent (not used to conform) |
+| `--assembly`     | both        | Assembly accession. Auto-detected if absent                   |
+| `--alias-db`     | both        | Path to a specific alias SQLite database (overrides cache)    |
 
 ### Auto-detection
 
@@ -121,6 +163,12 @@ If a sequence name in the input isn't in the alias database, the line
 is written to the output unchanged and counted in the unmapped total.
 Up to five example names are printed at the end of the run so you can
 see what didn't translate.
+
+Before giving up on a name, the tool tries a couple of conservative
+fallbacks: swapping a UCSC-style `vN` version separator for the `.N`
+form (and vice versa), and stripping an `ENA|...|accession` header
+wrapper down to the bare accession. These only run when the exact name
+isn't found, so they never override a direct match.
 
 ## Data updates
 

@@ -30,7 +30,7 @@ pip install "alias-mapper[trusted] @ git+https://github.com/Max25R/alias-mapper.
 ```
 
 The first time you run `convert`, the tool downloads the latest alias
-data (~35 MB) from GitHub Releases and builds a local SQLite database
+data (~100 MB) from GitHub Releases and builds a local SQLite database
 in your platform cache directory:
 
 - macOS:   `~/Library/Caches/alias-mapper/aliases.db`

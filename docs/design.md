@@ -297,7 +297,7 @@ files and published to GitHub Releases under `data-YYYY-MM-DD` tags.
 Each data release ships three artifacts (sizes from the full ~48k
 set):
 
-- `aliases.tsv.gz`     — merged-row per-assembly data (<!-- TODO: fill from the sharded full-set release page -->)
+- `aliases.tsv.gz`     — merged-row per-assembly data (~100 MB, full ~48k eukaryotic set)
 - `historical.tsv.gz`  — dead-accession lookup (~1.4 MB)
 - `failures.tsv`       — per-assembly collection failure log
 

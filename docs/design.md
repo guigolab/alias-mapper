@@ -15,11 +15,18 @@ without translation.
 
 **Shipped today:**
 
-- File formats: GFF, GTF, FASTA (single input file per invocation)
+- File formats: GFF, GTF, FASTA, plain or gzipped (`.gz` detected by
+  content on read, by extension on write)
+- Single-file convert, plus multi-file convert driven by a reference
+  FASTA (`convert --fasta REF [ANN ...]`): the alias table is loaded
+  once for the whole batch
 - Naming conventions: GenBank, RefSeq, UCSC, Sequence-Name,
   Assigned-Molecule
 - Source convention and assembly auto-detected from the input;
   overridable via flags
+- Lookup falls back to conservative name normalizations on an exact
+  miss: UCSC `.N`↔`vN` version-separator swap, and ENA `ENA|…|ACC`
+  header prefix strip
 - Pipeline streams NCBI's four `assembly_summary` files, publishes
   `aliases.tsv.gz` + `historical.tsv.gz` + `failures.tsv` as GitHub
   Release assets. The weekly run produces the full eukaryotic set
@@ -32,8 +39,6 @@ without translation.
 
 **On the horizon:**
 
-- Multi-file `align` subcommand: make several files share one
-  consistent naming convention, optionally driven by a reference FASTA
 - Issue #5 (suppressed-accession error messages) wired into the CLI
   using the already-shipped `historical.tsv.gz`
 - Hosted query API as the eventual replacement for the local DB
@@ -41,7 +46,14 @@ without translation.
 ## Command-line interface
 
 ```
-alias-mapper convert <input> --to <convention> [-o <output>] [options]
+# single file
+alias-mapper convert <input> --to <convention> -o <output> [options]
+
+# multi-file: conform annotations to the reference FASTA's convention
+alias-mapper convert --fasta <ref> [<ann> ...] --out-dir <dir> [options]
+
+# multi-file: force the FASTA and annotations to one convention
+alias-mapper convert --fasta <ref> [<ann> ...] --overwrite-to <convention> --out-dir <dir>
 ```
 
 ### Examples
@@ -56,17 +68,33 @@ alias-mapper convert annotations.gff --from refseq --to ucsc -o out.gff
 # Restrict lookup to a specific assembly
 alias-mapper convert annotations.gff --assembly GCF_000001405.40 \
     --to ucsc -o out.gff
+
+# Multi-file conform: rewrite the annotations to match ref.fa's own
+# convention; ref.fa is left untouched
+alias-mapper convert --fasta ref.fa peaks.gff genes.gtf --out-dir out/
+
+# Multi-file overwrite: force ref.fa and both annotations to UCSC
+alias-mapper convert --fasta ref.fa peaks.gff genes.gtf \
+    --overwrite-to ucsc --out-dir out/
 ```
 
 ### Flags
 
-| Flag            | Required | Purpose                                                  |
-| --------------- | -------- | -------------------------------------------------------- |
-| `--to`          | yes      | Target naming convention                                 |
-| `-o / --output` | yes      | Output path                                              |
-| `--from`        | no       | Source convention. Auto-detected if absent               |
-| `--assembly`    | no       | Restrict lookup to one assembly. Auto-detected if absent |
-| `--alias-db`    | no       | Path to the alias SQLite database                        |
+| Flag             | Mode        | Purpose                                                        |
+| ---------------- | ----------- | -------------------------------------------------------------- |
+| `--to`           | single-file | Target naming convention (required in single-file mode)        |
+| `-o / --output`  | single-file | Output path                                                    |
+| `--fasta`        | multi-file  | Reference FASTA; enables multi-file mode                       |
+| `--overwrite-to` | multi-file  | Force the FASTA and all annotations to this convention         |
+| `--out-dir`      | multi-file  | Output directory; each input written as `<stem>.<conv>.<ext>`  |
+| `--from`         | both        | Source convention. Auto-detected if absent. Not used in conform mode |
+| `--assembly`     | both        | Restrict lookup to one assembly. Auto-detected if absent       |
+| `--alias-db`     | both        | Path to the alias SQLite database                              |
+
+In multi-file mode, omitting `--overwrite-to` selects **conform** mode
+(annotations conform to the FASTA's own convention; the FASTA is left
+unchanged). `--to` is single-file only; in multi-file mode it errors
+with a pointer to `--overwrite-to`.
 
 ## Design decisions
 
@@ -107,15 +135,65 @@ making issues visible.
 unmapped rows) are not currently implemented but could be added
 without changing the default behaviour.
 
-### Single-file mode today, multi-file on the horizon
+### Fallback name resolution
 
-Today `convert` takes one input file per invocation. A common
-real-world workflow has one FASTA and several GFF files for the same
-assembly; running the tool repeatedly accepts the table-load cost
-each time. The planned `align` subcommand will take multiple files
-and a target convention (specified directly or inferred from a
-reference FASTA), load the alias table once, and translate all files
-in one pass.
+A bare exact lookup misses names that are the *same* identifier in a
+different surface form. On a miss (and only on a miss, so the common
+path stays a single dict lookup), `formats/_resolve.resolve_alias`
+tries a small set of conservative normalizations and retries:
+
+- **Version separator** (`.N` ↔ `vN`): UCSC writes unplaced scaffolds
+  with a `v` separator (`NW_013982187v1`) where GenBank/RefSeq use a dot
+  (`NW_013982187.1`). The two forms are swapped and retried.
+- **ENA header prefix** (`ENA|<unversioned>|<versioned>`): ENA FASTA
+  headers wrap the accession; the bare accession (the inner field) is
+  what matches our columns, so the wrapper is peeled and retried.
+
+These are surface-form rewrites of one accession, not fuzzy matching, so
+a fallback hit cannot map to an unrelated sequence. A genuine miss still
+warns and passes through unchanged. This handles header-parsing variants
+seen in the wild without loosening the exact-match guarantee for the
+common case.
+
+### Multi-file mode: conform vs. overwrite
+
+The common real-world workflow has one reference FASTA and several
+annotation files (GFF/GTF) for the same assembly. Multi-file mode
+(`convert --fasta REF [ANN ...]`) detects the assembly once from the
+FASTA, loads the alias table once, and processes the batch.
+
+The guiding idea is *consistency*, not translation to a fixed target:
+the usual goal is to make a genome and its annotations agree on one
+naming convention. That drives two modes:
+
+- **Conform** (no `--overwrite-to`): detect the FASTA's own convention
+  C, rewrite each annotation into C, and leave the FASTA untouched. The
+  FASTA is the reference the user already has, so it is not copied into
+  `--out-dir` — only the conformed annotations are written. This is the
+  default because it matches the "make my annotations match my genome"
+  case without forcing the user to name a convention.
+- **Overwrite** (`--overwrite-to TGT`): detect the shared source
+  convention from the FASTA and force the FASTA and every annotation to
+  TGT. This is the "normalize everything to X" case.
+
+`--to` stays single-file-only. In multi-file mode it is rejected (with
+a pointer to `--overwrite-to`) rather than silently reinterpreted, so
+the two flags never blur together.
+
+Conform mode builds its `{any-convention-name -> C}` map by merging the
+existing one-source/one-target `get_map` over the non-C convention
+columns, so it needs no change to the `AliasSource` interface or the
+SQLite schema. One consequence: a name that is *already* in C is not a
+key in that map, so it passes through unchanged (the correct output)
+but lands in the unmapped tally. Conform mode therefore reports
+passthrough as a neutral note rather than a warning. A first-class
+`get_conform_map` on `AliasSource` (one query folding every convention
+column to the target, including C's own values) would make the count
+exact; it is deferred because it extends the future-API seam and is
+worth raising with that design rather than adding unilaterally.
+
+Not supported: per-line resolution for files that mix conventions
+across rows. One source convention per annotation file.
 
 ## Architecture
 
@@ -171,7 +249,7 @@ plus one line in the dict.
 - **Linear time:** single pass over the input; one dict lookup per row.
 - **One alias-table load per invocation:** the per-assembly subset of
   the DB (~50 rows) is loaded into memory once and reused for every
-  input line.
+  input line; in multi-file mode it is loaded once for the whole batch.
 
 ## Edge cases
 
@@ -187,7 +265,7 @@ Status column: ✓ currently implemented, ◯ planned but not yet built.
 | FASTA header with description (`>chr1 Homo sapiens...`)         | Translate the first token only; preserve description (including whitespace) |   ✓    |
 | Unknown file extension                                          | Error listing supported extensions                                           |   ✓    |
 | File is empty                                                   | Warn; write empty output; exit 0                                             |   ◯    |
-| File is gzipped (`.gff.gz`)                                     | Auto-detect by extension; read transparently                                 |   ◯    |
+| File is gzipped (`.gff.gz` or bare gzip)                        | Detected by content on read, by extension on write; handled transparently    |   ✓    |
 | Mixed line endings (`\r\n` vs `\n`)                             | Normalise on read                                                            |   ◯    |
 | Malformed line (wrong column count)                             | Warn; pass through unchanged                                                 |   ◯    |
 | GFF metadata lines with sequence names (`##sequence-region`)    | Translate names in those header lines too                                    |   ◯    |
@@ -200,6 +278,8 @@ Status column: ✓ currently implemented, ◯ planned but not yet built.
 | Auto-detection has no clear winner                     | Error; require explicit `--from` or `--assembly`                                |   ✓    |
 | Mitochondrial DNA aliases (`MT`, `chrM`, `chrMT`)      | Handled normally — these are entries in the alias table                         |   ✓    |
 | Accession with version mismatch (`CM000663.1` vs `.2`) | Strict version matching by default. `--ignore-version` strips the suffix        |   ◯    |
+| UCSC version separator (`NW_...v1` vs `NW_....1`)      | Swapped and retried on an exact-lookup miss                                     |   ✓    |
+| ENA pipe-prefixed header (`ENA\|ACC\|ACC.v`)           | Stripped to the bare accession and retried on an exact-lookup miss              |   ✓    |
 | Mixed conventions within one file                      | Per-line resolution (stretch)                                                   |   ◯    |
 
 ### Output
@@ -407,21 +487,6 @@ failing. Only the sharded workflow is scheduled, so the two can't
 collide on a `data-*` release tag.
 
 ## What's next
-
-### Multi-file `align` subcommand
-
-`convert` (the current single-file flow) stays as-is. `align` is the
-planned addition for the multi-file workflow:
-
-```
-alias-mapper align --fasta ref.fa annotations.gff peaks.gff
-alias-mapper align --to ucsc annotations.gff peaks.gff
-```
-
-The first form uses a reference FASTA's convention as the target; the
-second specifies the target directly. Both share the existing
-translator code under the hood. Reframing: the goal is making a set
-of files *consistent*, not specifically performing a translation.
 
 ### Suppressed-accession messages (issue #5)
 

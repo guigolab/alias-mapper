@@ -239,3 +239,6 @@ test_new.fa
 
 # Build outputs from collection scripts
 data/
+
+# Smoke-test harness output (regenerable, large)
+smoke-data/

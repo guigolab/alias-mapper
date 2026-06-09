@@ -60,7 +60,7 @@ try:
 except Exception:                                # noqa: BLE001
     SSL_CONTEXT = None
 
-USER_AGENT = "alias-mapper-smoke (+https://github.com/Max25R/alias-mapper)"
+USER_AGENT = "alias-mapper-smoke (+https://github.com/guigolab/alias-mapper)"
 CHUNK = 256 * 1024
 _GZIP_MAGIC = b"\x1f\x8b"
 

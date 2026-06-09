@@ -18,7 +18,7 @@ assembly are auto-detected from the input by default.
 ## Install
 
 ```bash
-pip install git+https://github.com/Max25R/alias-mapper.git
+pip install git+https://github.com/guigolab/alias-mapper.git
 ```
 
 On networks that perform TLS inspection (corporate / institutional,
@@ -26,7 +26,7 @@ e.g. CRG), also install the `trusted` extra so the tool uses the
 system keychain for cert verification:
 
 ```bash
-pip install "alias-mapper[trusted] @ git+https://github.com/Max25R/alias-mapper.git"
+pip install "alias-mapper[trusted] @ git+https://github.com/guigolab/alias-mapper.git"
 ```
 
 The first time you run `convert`, the tool downloads the latest alias

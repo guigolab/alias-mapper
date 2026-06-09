@@ -35,7 +35,7 @@ from ._ssl import SSL_CONTEXT
 
 # GitHub repo coordinates. Constants up here so they're easy to change
 # if the project moves or someone forks it.
-GITHUB_OWNER = "Max25R"
+GITHUB_OWNER = "guigolab"
 GITHUB_REPO = "alias-mapper"
 RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
 

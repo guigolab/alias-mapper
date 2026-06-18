@@ -1,0 +1,103 @@
+name: Publish to PyPI
+
+# Publishes to PyPI when a version tag (v*) is pushed - the same tag
+# convention ci.yml uses. Deliberately NOT triggered on `release:
+# published`, because the weekly data pipeline publishes `data-*`
+# releases and those must never trigger a package publish.
+#
+# A manual run (workflow_dispatch) publishes to TestPyPI instead, so the
+# whole flow can be rehearsed without consuming a real version number.
+#
+# Auth is PyPI Trusted Publishing (OIDC): no API token is stored as a
+# secret. PyPI verifies the workflow's identity (repo + workflow file +
+# environment) and hands back a short-lived token. This requires a
+# one-time "trusted publisher" set up on PyPI/TestPyPI and the GitHub
+# environments named below.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test + build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Gate the release on the test suite so a broken tag never reaches
+      # PyPI. (ci.yml runs the full matrix in parallel; this is the
+      # publish-blocking smoke check.)
+      - name: Install and test
+        run: |
+          python -m pip install --upgrade pip build twine
+          pip install -e .[test]
+          pytest -q
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check metadata renders on PyPI
+        run: twine check dist/*
+
+      # On a version tag, fail loudly if the tag doesn't match the built
+      # version (e.g. you tagged v2.1.0 but forgot to bump __version__).
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.whl | sed -E 's/.*alias_mapper-([^-]+)-.*/\1/')
+          echo "git tag: $tag    built version: $built"
+          if [ "$tag" != "$built" ]; then
+            echo "::error::tag v$tag does not match package version $built. Bump __version__ in src/alias_mapper/__init__.py to match the tag."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    name: Publish to TestPyPI (manual dry-run)
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  pypi:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alias-mapper"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Translate chromosome/scaffold names in bioinformatics files between naming conventions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,6 +49,12 @@ Issues = "https://github.com/guigolab/alias-mapper/issues"
 
 [project.scripts]
 alias-mapper = "alias_mapper.cli:main"
+
+# Single-source the version from the package so a release is one number to
+# bump (src/alias_mapper/__init__.py). setuptools reads __version__ without
+# importing the package, so this stays cheap and import-safe.
+[tool.setuptools.dynamic]
+version = { attr = "alias_mapper.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

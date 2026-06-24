@@ -9,10 +9,11 @@ name: Publish to PyPI
 # whole flow can be rehearsed without consuming a real version number.
 #
 # Auth is PyPI Trusted Publishing (OIDC): no API token is stored as a
-# secret. PyPI verifies the workflow's identity (repo + workflow file +
-# environment) and hands back a short-lived token. This requires a
-# one-time "trusted publisher" set up on PyPI/TestPyPI and the GitHub
-# environments named below.
+# secret. PyPI verifies the workflow's identity (repo + workflow file)
+# and hands back a short-lived token. This requires a one-time "trusted
+# publisher" set up on PyPI/TestPyPI pointing at this repo and workflow.
+# No GitHub Environment is used; if you later add one, set the matching
+# Environment name on the PyPI trusted-publisher config too.
 on:
   push:
     tags: ['v*']
@@ -74,7 +75,6 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
-    environment: testpypi
     permissions:
       id-token: write
     steps:
@@ -92,7 +92,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       id-token: write
     steps:
